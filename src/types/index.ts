@@ -132,10 +132,13 @@ export interface MessageLinkPreview {
   siteName: string;
 }
 
+export type MessageDeliveryStatus = 'sending' | 'sent' | 'delivered' | 'read' | 'failed';
+
 export interface Message {
   id: string;
   conversationId: string;
   senderId: string;
+  clientMessageId?: string | null;
   sender: {
     id: string;
     fullName: string;
@@ -161,7 +164,15 @@ export interface Message {
   deletedAt: string | null;
   deliveredTo: string[];
   readBy: string[];
-  deliveryStatus: 'sent' | 'delivered' | 'read';
+  deliveryStatus: MessageDeliveryStatus;
+  localError?: string | null;
+  retryPayload?: {
+    content?: string;
+    messageType: 'text' | 'image' | 'video' | 'document' | 'voice';
+    attachments?: MessageAttachment[];
+    replyTo?: string | null;
+    duration?: number;
+  } | null;
   createdAt: string;
 }
 

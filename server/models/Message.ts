@@ -29,6 +29,7 @@ export interface IMessageLink {
 export interface IMessage extends Document {
   conversationId: Types.ObjectId;
   senderId: Types.ObjectId;
+  clientMessageId?: string | null;
   content: string;
   messageType: MessageType;
   attachments: IMessageAttachment[];
@@ -94,6 +95,12 @@ const messageSchema = new Schema<IMessage>(
       ref: 'User',
       required: true,
     },
+    clientMessageId: {
+      type: String,
+      default: null,
+      trim: true,
+      maxlength: 120,
+    },
     content: {
       type: String,
       default: '',
@@ -149,6 +156,13 @@ const messageSchema = new Schema<IMessage>(
 );
 
 messageSchema.index({ conversationId: 1, createdAt: -1 });
+messageSchema.index(
+  { conversationId: 1, senderId: 1, clientMessageId: 1 },
+  {
+    unique: true,
+    partialFilterExpression: { clientMessageId: { $type: 'string' } },
+  }
+);
 messageSchema.index({ content: 'text' });
 
 export const Message = mongoose.model<IMessage>('Message', messageSchema);

@@ -238,3 +238,23 @@ export async function extractAndFetchLinkPreviews(
   if (urls.length === 0) return [];
   return Promise.all(urls.map((u) => fetchLinkPreview(u)));
 }
+
+export function extractUrlStubs(text: string): LinkPreviewMeta[] {
+  const urls = extractUrlsFromText(text).slice(0, 3);
+  return urls.map((rawUrl) => {
+    let domain = rawUrl;
+    try {
+      domain = new URL(rawUrl).hostname.replace(/^www\./i, '');
+    } catch {
+      // Keep rawUrl fallback
+    }
+    return {
+      url: rawUrl,
+      domain,
+      title: domain,
+      description: '',
+      image: '',
+      siteName: domain,
+    };
+  });
+}

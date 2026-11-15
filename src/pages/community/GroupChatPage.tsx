@@ -15,7 +15,7 @@ import {
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { DropdownMenu } from '../../components/DropdownMenu';
 import { MessageBubble } from '../../components/MessageBubble';
-import { MessageInput } from '../../components/MessageInput';
+import { MessageInput, type OutgoingMessagePayload } from '../../components/MessageInput';
 import { Modal } from '../../components/Modal';
 import { PrimaryButton } from '../../components/PrimaryButton';
 import { SharedMediaPanel } from '../../components/SharedMediaPanel';
@@ -28,6 +28,7 @@ import {
   communityApi,
   conversationApi,
   extractApiError,
+  mediaApi,
   messageApi,
 } from '../../services/api';
 import type {
@@ -35,8 +36,19 @@ import type {
   Conversation,
   Message,
   MessageAttachment,
+  MessageLinkPreview,
 } from '../../types';
 import { formatDateSeparator } from '../../utils/formatters';
+import {
+  createOptimisticMessage,
+  dispatchMessageToServer,
+  formatSendErrorMessage,
+  generateClientMessageId,
+  markOptimisticFailed,
+  markOptimisticSending,
+  reconcileIncomingMessage,
+  removeOptimisticMessage,
+} from '../../utils/optimisticMessages';
 
 export function GroupChatPage() {
   const { communityId } = useParams<{ communityId: string }>();
@@ -69,6 +81,31 @@ export function GroupChatPage() {
   const [hasNewerMessages, setHasNewerMessages] = useState(false);
 
   const bottomRef = useRef<HTMLDivElement>(null);
+  const localMediaFilesRef = useRef<
+    Record<string, { file: Blob | File; duration?: number; blobUrl?: string }>
+  >({});
+  const uploadedAttachmentsRef = useRef<Record<string, MessageAttachment[]>>({});
+  const inFlightSendRef = useRef<Set<string>>(new Set());
+
+  const cleanupLocalResources = useCallback((clientMessageId?: string | null) => {
+    if (!clientMessageId) return;
+    const entry = localMediaFilesRef.current[clientMessageId];
+    if (entry?.blobUrl) {
+      URL.revokeObjectURL(entry.blobUrl);
+    }
+    delete localMediaFilesRef.current[clientMessageId];
+    delete uploadedAttachmentsRef.current[clientMessageId];
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      Object.values(localMediaFilesRef.current).forEach((entry) => {
+        if (entry.blobUrl) URL.revokeObjectURL(entry.blobUrl);
+      });
+      localMediaFilesRef.current = {};
+      uploadedAttachmentsRef.current = {};
+    };
+  }, []);
 
   const loadGroupChat = useCallback(async () => {
     if (!communityId) return;
@@ -95,7 +132,9 @@ export function GroupChatPage() {
         }
 
         socket?.emit('group:join', { conversationId: commData.conversationId });
-        socket?.emit('message:read', { conversationId: commData.conversationId });
+        if (typeof document === 'undefined' || document.visibilityState === 'visible') {
+          socket?.emit('message:read', { conversationId: commData.conversationId });
+        }
       }
     } catch (err) {
       setError(extractApiError(err).message);
@@ -127,25 +166,57 @@ export function GroupChatPage() {
 
   const convId = community?.conversationId || '';
 
+  const emitReadIfVisible = useCallback(() => {
+    if (!socket || !convId) return;
+    if (typeof document !== 'undefined' && document.visibilityState !== 'visible') {
+      return;
+    }
+    socket.emit('message:read', { conversationId: convId });
+  }, [socket, convId]);
+
+  useEffect(() => {
+    const handleVisibilityOrFocus = () => {
+      if (document.visibilityState === 'visible') {
+        emitReadIfVisible();
+      }
+    };
+    window.addEventListener('focus', handleVisibilityOrFocus);
+    document.addEventListener('visibilitychange', handleVisibilityOrFocus);
+    return () => {
+      window.removeEventListener('focus', handleVisibilityOrFocus);
+      document.removeEventListener('visibilitychange', handleVisibilityOrFocus);
+    };
+  }, [emitReadIfVisible]);
+
   useEffect(() => {
     if (!socket || !convId) return;
 
     const onNewMessage = (msg: Message) => {
       if (msg.conversationId !== convId) return;
+      cleanupLocalResources(msg.clientMessageId);
       if (!hasNewerMessages) {
-        setMessages((prev) =>
-          prev.some((m) => m.id === msg.id) ? prev : [...prev, msg]
-        );
+        setMessages((prev) => reconcileIncomingMessage(prev, msg));
         setTimeout(() => bottomRef.current?.scrollIntoView({ behavior: 'smooth' }), 40);
       }
       if (msg.senderId !== user?.id) {
-        socket.emit('message:read', { conversationId: convId });
+        emitReadIfVisible();
       }
     };
 
     const onEditMessage = (updated: Message) => {
       if (updated.conversationId !== convId) return;
       setMessages((prev) => prev.map((m) => (m.id === updated.id ? updated : m)));
+    };
+
+    const onMessageLinks = (payload: {
+      id: string;
+      conversationId: string;
+      links: MessageLinkPreview[];
+    }) => {
+      if (payload.conversationId !== convId) return;
+      setMessages((prev) =>
+        prev.map((m) => (m.id === payload.id ? { ...m, links: payload.links } : m))
+      );
     };
 
     const onDeleteMessage = (payload: {
@@ -163,6 +234,52 @@ export function GroupChatPage() {
                 content: 'This message was deleted',
                 attachments: [],
                 reactions: [],
+              }
+            : m
+        )
+      );
+    };
+
+    const onDelivered = (payload: {
+      conversationId: string;
+      messageIds: string[];
+      userId?: string;
+    }) => {
+      if (payload.conversationId !== convId) return;
+      setMessages((prev) =>
+        prev.map((m) => {
+          if (!payload.messageIds.includes(m.id)) return m;
+          const nextDeliveredTo =
+            payload.userId && !m.deliveredTo.includes(payload.userId)
+              ? [...m.deliveredTo, payload.userId]
+              : m.deliveredTo;
+          return {
+            ...m,
+            deliveredTo: nextDeliveredTo,
+            deliveryStatus: m.deliveryStatus === 'sent' ? 'delivered' : m.deliveryStatus,
+          };
+        })
+      );
+    };
+
+    const onRead = (payload: {
+      conversationId: string;
+      messageIds: string[];
+      userId: string;
+    }) => {
+      if (payload.conversationId !== convId) return;
+      setMessages((prev) =>
+        prev.map((m) =>
+          payload.messageIds.includes(m.id)
+            ? {
+                ...m,
+                deliveryStatus: 'read',
+                deliveredTo: m.deliveredTo.includes(payload.userId)
+                  ? m.deliveredTo
+                  : [...m.deliveredTo, payload.userId],
+                readBy: m.readBy.includes(payload.userId)
+                  ? m.readBy
+                  : [...m.readBy, payload.userId],
               }
             : m
         )
@@ -210,7 +327,10 @@ export function GroupChatPage() {
 
     socket.on('message:new', onNewMessage);
     socket.on('message:edit', onEditMessage);
+    socket.on('message:links', onMessageLinks);
     socket.on('message:delete', onDeleteMessage);
+    socket.on('message:delivered', onDelivered);
+    socket.on('message:read', onRead);
     socket.on('reaction:add', onReaction);
     socket.on('reaction:remove', onReaction);
     socket.on('conversation:updated', onConvUpdated);
@@ -223,7 +343,10 @@ export function GroupChatPage() {
     return () => {
       socket.off('message:new', onNewMessage);
       socket.off('message:edit', onEditMessage);
+      socket.off('message:links', onMessageLinks);
       socket.off('message:delete', onDeleteMessage);
+      socket.off('message:delivered', onDelivered);
+      socket.off('message:read', onRead);
       socket.off('reaction:add', onReaction);
       socket.off('reaction:remove', onReaction);
       socket.off('conversation:updated', onConvUpdated);
@@ -233,7 +356,17 @@ export function GroupChatPage() {
       socket.off('community:deleted', onCommunityDeleted);
       socket.off('community:removed', onCommunityDeleted);
     };
-  }, [socket, convId, user?.id, loadGroupChat, communityId, navigate, hasNewerMessages]);
+  }, [
+    socket,
+    convId,
+    user?.id,
+    loadGroupChat,
+    communityId,
+    navigate,
+    hasNewerMessages,
+    cleanupLocalResources,
+    emitReadIfVisible,
+  ]);
 
   const handleLeaveCommunity = async () => {
     if (!community) return;
@@ -274,6 +407,164 @@ export function GroupChatPage() {
     } catch (err) {
       showToast(extractApiError(err).message, 'error');
     }
+  };
+
+  const performSendAttempt = async (params: {
+    clientMessageId: string;
+    content?: string;
+    messageType: 'text' | 'image' | 'video' | 'document' | 'voice';
+    attachments?: MessageAttachment[];
+    replyTo?: string | null;
+  }) => {
+    if (!convId) return;
+    const { clientMessageId, content, messageType, replyTo } = params;
+    if (inFlightSendRef.current.has(clientMessageId)) return;
+    inFlightSendRef.current.add(clientMessageId);
+
+    try {
+      let resolvedAttachments =
+        uploadedAttachmentsRef.current[clientMessageId] || params.attachments || [];
+
+      const localEntry = localMediaFilesRef.current[clientMessageId];
+      if (localEntry && !uploadedAttachmentsRef.current[clientMessageId]) {
+        const folder = messageType === 'voice' ? 'voice' : 'messages';
+        const fileNameOverride =
+          messageType === 'voice' ? `voice-${Date.now()}.webm` : undefined;
+        const uploaded = await mediaApi.upload(
+          localEntry.file,
+          folder,
+          undefined,
+          fileNameOverride
+        );
+        if (localEntry.duration) {
+          uploaded.duration = localEntry.duration;
+        }
+        resolvedAttachments = [uploaded];
+        uploadedAttachmentsRef.current[clientMessageId] = resolvedAttachments;
+      }
+
+      const created = await dispatchMessageToServer({
+        socket,
+        payload: {
+          conversationId: convId,
+          clientMessageId,
+          content,
+          messageType,
+          attachments: resolvedAttachments,
+          replyTo,
+        },
+      });
+
+      cleanupLocalResources(clientMessageId);
+
+      if (hasNewerMessages) {
+        const latest = await messageApi.list(convId);
+        setMessages(latest.messages);
+        setHasMore(latest.hasMore);
+        setHasNewerMessages(false);
+      } else {
+        setMessages((prev) => reconcileIncomingMessage(prev, created));
+      }
+
+      window.dispatchEvent(
+        new CustomEvent('blinkupz:shared-media-refresh', {
+          detail: { conversationId: convId },
+        })
+      );
+    } catch (err) {
+      const errorMsg = formatSendErrorMessage(err);
+      setMessages((prev) => markOptimisticFailed(prev, clientMessageId, errorMsg));
+    } finally {
+      inFlightSendRef.current.delete(clientMessageId);
+    }
+  };
+
+  const handleSendMessage = (payload: OutgoingMessagePayload) => {
+    if (!user || !convId) return;
+    const clientMessageId = generateClientMessageId();
+    const replySnapshot = replyingTo;
+    setReplyingTo(null);
+
+    let initialAttachments: MessageAttachment[] = payload.attachments || [];
+    if (payload.localFile) {
+      const blobUrl = URL.createObjectURL(payload.localFile);
+      const fileObj = payload.localFile;
+      const fileName =
+        'name' in fileObj && typeof fileObj.name === 'string'
+          ? fileObj.name
+          : payload.messageType === 'voice'
+            ? 'Voice message'
+            : 'attachment';
+
+      localMediaFilesRef.current[clientMessageId] = {
+        file: fileObj,
+        duration: payload.duration,
+        blobUrl,
+      };
+      initialAttachments = [
+        {
+          url: blobUrl,
+          publicId: '',
+          fileName,
+          fileSize: fileObj.size || 0,
+          mimeType: fileObj.type || '',
+          duration: payload.duration,
+        },
+      ];
+    }
+
+    const optimistic = createOptimisticMessage({
+      clientMessageId,
+      conversationId: convId,
+      sender: user,
+      content: payload.content || '',
+      messageType: payload.messageType,
+      attachments: initialAttachments,
+      replyTo: replySnapshot,
+      duration: payload.duration,
+    });
+
+    if (hasNewerMessages) {
+      setMessages([optimistic]);
+      setHasNewerMessages(false);
+    } else {
+      setMessages((prev) => [...prev, optimistic]);
+    }
+
+    requestAnimationFrame(() => {
+      bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
+    });
+
+    void performSendAttempt({
+      clientMessageId,
+      content: payload.content,
+      messageType: payload.messageType,
+      attachments: payload.localFile ? undefined : payload.attachments,
+      replyTo: replySnapshot?.id || null,
+    });
+  };
+
+  const handleRetryMessage = (msg: Message) => {
+    const cid = msg.clientMessageId || msg.id;
+    if (!cid || inFlightSendRef.current.has(cid)) return;
+    setMessages((prev) => markOptimisticSending(prev, cid));
+    void performSendAttempt({
+      clientMessageId: cid,
+      content: msg.retryPayload?.content ?? msg.content,
+      messageType:
+        msg.retryPayload?.messageType ??
+        (msg.messageType === 'system' ? 'text' : msg.messageType),
+      attachments: localMediaFilesRef.current[cid]
+        ? undefined
+        : msg.retryPayload?.attachments ?? msg.attachments,
+      replyTo: msg.retryPayload?.replyTo ?? msg.replyTo?.id ?? null,
+    });
+  };
+
+  const handleDismissFailed = (msg: Message) => {
+    const cid = msg.clientMessageId || msg.id;
+    cleanupLocalResources(cid);
+    setMessages((prev) => removeOptimisticMessage(prev, msg.id));
   };
 
   const handleBackToLatest = async () => {
@@ -590,6 +881,8 @@ export function GroupChatPage() {
                   showToast('Copied to clipboard.', 'info');
                 }}
                 onPreviewImage={(url) => setPreviewImage(url)}
+                onRetry={handleRetryMessage}
+                onDismissFailed={handleDismissFailed}
               />
             </React.Fragment>
           );
@@ -617,36 +910,7 @@ export function GroupChatPage() {
           onCancelEdit={() => setEditingMessage(null)}
           onTypingStart={() => socket?.emit('typing:start', { conversationId: convId })}
           onTypingStop={() => socket?.emit('typing:stop', { conversationId: convId })}
-          onSendMessage={async (payload: {
-            content?: string;
-            messageType: 'text' | 'image' | 'video' | 'document' | 'voice';
-            attachments?: MessageAttachment[];
-          }) => {
-            const created = await messageApi.send({
-              conversationId: convId,
-              content: payload.content,
-              messageType: payload.messageType,
-              attachments: payload.attachments,
-              replyTo: replyingTo?.id || null,
-            });
-            setReplyingTo(null);
-            if (hasNewerMessages) {
-              const latest = await messageApi.list(convId);
-              setMessages(latest.messages);
-              setHasMore(latest.hasMore);
-              setHasNewerMessages(false);
-            } else {
-              setMessages((prev) =>
-                prev.some((m) => m.id === created.id) ? prev : [...prev, created]
-              );
-            }
-            window.dispatchEvent(
-              new CustomEvent('blinkupz:shared-media-refresh', {
-                detail: { conversationId: convId },
-              })
-            );
-            setTimeout(() => bottomRef.current?.scrollIntoView({ behavior: 'smooth' }), 30);
-          }}
+          onSendMessage={handleSendMessage}
           onSaveEdit={async (id, content) => {
             const updated = await messageApi.edit(id, content);
             setEditingMessage(null);

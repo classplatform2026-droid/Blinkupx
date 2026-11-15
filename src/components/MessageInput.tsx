@@ -1,11 +1,19 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { Mic, Paperclip, Send, Smile, Square, Trash2, X } from 'lucide-react';
 import { useToast } from '../context/ToastContext';
-import { extractApiError, mediaApi } from '../services/api';
+import { extractApiError } from '../services/api';
 import type { Message, MessageAttachment } from '../types';
 import { formatDuration } from '../utils/formatters';
 import { AttachmentMenu } from './AttachmentMenu';
 import { EmojiPicker } from './EmojiPicker';
+
+export interface OutgoingMessagePayload {
+  content?: string;
+  messageType: 'text' | 'image' | 'video' | 'document' | 'voice';
+  attachments?: MessageAttachment[];
+  localFile?: Blob | File;
+  duration?: number;
+}
 
 interface MessageInputProps {
   enterToSend?: boolean;
@@ -15,11 +23,7 @@ interface MessageInputProps {
   onCancelEdit: () => void;
   onTypingStart: () => void;
   onTypingStop: () => void;
-  onSendMessage: (payload: {
-    content?: string;
-    messageType: 'text' | 'image' | 'video' | 'document' | 'voice';
-    attachments?: MessageAttachment[];
-  }) => Promise<void>;
+  onSendMessage: (payload: OutgoingMessagePayload) => void | Promise<void>;
   onSaveEdit: (messageId: string, content: string) => Promise<void>;
 }
 
@@ -36,10 +40,9 @@ export function MessageInput({
 }: MessageInputProps) {
   const { showToast } = useToast();
   const [text, setText] = useState('');
-  const [sending, setSending] = useState(false);
+  const [savingEdit, setSavingEdit] = useState(false);
   const [showAttachments, setShowAttachments] = useState(false);
   const [showEmoji, setShowEmoji] = useState(false);
-  const [uploadProgress, setUploadProgress] = useState<number | null>(null);
 
   // Voice recording state
   const [recording, setRecording] = useState(false);
@@ -80,41 +83,43 @@ export function MessageInput({
   const handleSubmit = async () => {
     const trimmed = text.trim();
     if (!trimmed && !recordedBlob) return;
-    setSending(true);
+    if (typingTimeoutRef.current) clearTimeout(typingTimeoutRef.current);
     onTypingStop();
-    try {
-      if (editingMessage) {
-        if (!trimmed) return;
+
+    if (editingMessage) {
+      if (!trimmed || savingEdit) return;
+      setSavingEdit(true);
+      try {
         await onSaveEdit(editingMessage.id, trimmed);
         setText('');
-      } else if (recordedBlob) {
-        setUploadProgress(5);
-        const uploaded = await mediaApi.upload(
-          recordedBlob,
-          'voice',
-          (p) => setUploadProgress(p),
-          `voice-${Date.now()}.webm`
-        );
-        uploaded.duration = recordSeconds;
-        await onSendMessage({
-          content: '',
-          messageType: 'voice',
-          attachments: [uploaded],
-        });
-        cancelRecording();
-      } else {
-        await onSendMessage({
-          content: trimmed,
-          messageType: 'text',
-        });
-        setText('');
+      } catch (err) {
+        showToast(extractApiError(err).message, 'error');
+      } finally {
+        setSavingEdit(false);
       }
-    } catch (err) {
-      showToast(extractApiError(err).message, 'error');
-    } finally {
-      setSending(false);
-      setUploadProgress(null);
+      return;
     }
+
+    if (recordedBlob) {
+      const blobToSend = recordedBlob;
+      const durationToSend = recordSeconds;
+      cancelRecording();
+      void onSendMessage({
+        content: '',
+        messageType: 'voice',
+        localFile: blobToSend,
+        duration: durationToSend,
+      });
+      return;
+    }
+
+    setText('');
+    setShowEmoji(false);
+    setShowAttachments(false);
+    void onSendMessage({
+      content: trimmed,
+      messageType: 'text',
+    });
   };
 
   const handlePickAttachment = (type: 'image' | 'video' | 'document') => {
@@ -131,36 +136,27 @@ export function MessageInput({
     }
   };
 
-  const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     e.target.value = '';
     if (!file) return;
 
-    setSending(true);
-    setUploadProgress(5);
-    try {
-      const uploaded = await mediaApi.upload(file, 'messages', (p) =>
-        setUploadProgress(p)
-      );
-      const mime = (uploaded.mimeType || file.type || '').toLowerCase();
-      let resolvedType: 'image' | 'video' | 'document' | 'voice' = pendingUploadType;
-      if (mime.startsWith('image/')) resolvedType = 'image';
-      else if (mime.startsWith('video/')) resolvedType = 'video';
-      else if (mime.startsWith('audio/')) resolvedType = 'voice';
-      else if (mime) resolvedType = 'document';
+    const mime = (file.type || '').toLowerCase();
+    let resolvedType: 'image' | 'video' | 'document' | 'voice' = pendingUploadType;
+    if (mime.startsWith('image/')) resolvedType = 'image';
+    else if (mime.startsWith('video/')) resolvedType = 'video';
+    else if (mime.startsWith('audio/')) resolvedType = 'voice';
+    else if (mime) resolvedType = 'document';
 
-      await onSendMessage({
-        content: text.trim(),
-        messageType: resolvedType,
-        attachments: [uploaded],
-      });
-      setText('');
-    } catch (err) {
-      showToast(extractApiError(err).message, 'error');
-    } finally {
-      setSending(false);
-      setUploadProgress(null);
-    }
+    const caption = text.trim();
+    setText('');
+    setShowEmoji(false);
+    setShowAttachments(false);
+    void onSendMessage({
+      content: caption,
+      messageType: resolvedType,
+      localFile: file,
+    });
   };
 
   const startRecording = async () => {
@@ -232,21 +228,6 @@ export function MessageInput({
         onChange={handleFileChange}
       />
 
-      {uploadProgress !== null && (
-        <div className="mb-2.5">
-          <div className="flex items-center justify-between text-xs text-[#999999] mb-1">
-            <span>Uploading media</span>
-            <span className="font-mono tabular-nums">{uploadProgress}%</span>
-          </div>
-          <div className="h-1 w-full rounded-full bg-[#242424] overflow-hidden">
-            <div
-              className="h-full bg-[#FFFFFF] transition-all duration-150"
-              style={{ width: `${uploadProgress}%` }}
-            />
-          </div>
-        </div>
-      )}
-
       {(replyingTo || editingMessage) && (
         <div className="mb-2.5 flex items-center justify-between gap-3 rounded-xl bg-[#202020] border border-[#303030] px-3.5 py-2">
           <div className="min-w-0">
@@ -316,10 +297,9 @@ export function MessageInput({
           </span>
           <button
             type="button"
-            disabled={sending}
             onClick={handleSubmit}
             aria-label="Send voice message"
-            className="min-w-[40px] min-h-[40px] rounded-xl bg-[#FFFFFF] text-[#181818] flex items-center justify-center hover:bg-[#E8E8E8] cursor-pointer shrink-0 disabled:opacity-50"
+            className="min-w-[40px] min-h-[40px] rounded-xl bg-[#FFFFFF] text-[#181818] flex items-center justify-center hover:bg-[#E8E8E8] cursor-pointer shrink-0"
           >
             <Send className="w-4 h-4" />
           </button>
@@ -384,7 +364,7 @@ export function MessageInput({
           {text.trim() || editingMessage ? (
             <button
               type="button"
-              disabled={sending}
+              disabled={savingEdit}
               onClick={handleSubmit}
               aria-label="Send message"
               className="min-w-[44px] min-h-[44px] rounded-xl bg-[#FFFFFF] text-[#181818] flex items-center justify-center hover:bg-[#E8E8E8] transition-colors cursor-pointer shrink-0 disabled:opacity-50"

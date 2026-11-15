@@ -2,7 +2,7 @@ import React, { createContext, useContext, useEffect, useRef, useState } from 'r
 import { useLocation, useNavigate } from 'react-router-dom';
 import { io, type Socket } from 'socket.io-client';
 import { getStoredAuthToken } from '../services/api';
-import type { NotificationSoundTone } from '../types';
+import type { Message, NotificationSoundTone } from '../types';
 import {
   DEFAULT_NOTIFICATION_SETTINGS,
   playNotificationTone,
@@ -46,6 +46,7 @@ export function SocketProvider({ children }: { children: React.ReactNode }) {
     Record<string, Array<{ userId: string; username: string }>>
   >({});
   const typingTimeoutsRef = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
+  const ackedDeliveredIdsRef = useRef<Set<string>>(new Set());
   const userRef = useRef(user);
   const pathnameRef = useRef(location.pathname);
 
@@ -65,6 +66,7 @@ export function SocketProvider({ children }: { children: React.ReactNode }) {
       });
       setConnected(false);
       setPresenceMap({});
+      ackedDeliveredIdsRef.current.clear();
       return;
     }
 
@@ -78,9 +80,37 @@ export function SocketProvider({ children }: { children: React.ReactNode }) {
       reconnection: true,
     });
 
+    const acknowledgeDelivered = (msg?: Pick<Message, 'id' | 'conversationId' | 'senderId'>) => {
+      if (!msg?.id || !msg.conversationId || msg.senderId === user.id) return;
+      if (ackedDeliveredIdsRef.current.has(msg.id)) return;
+      ackedDeliveredIdsRef.current.add(msg.id);
+      if (ackedDeliveredIdsRef.current.size > 250) {
+        const first = ackedDeliveredIdsRef.current.values().next().value;
+        if (first) ackedDeliveredIdsRef.current.delete(first);
+      }
+      s.emit('message:delivered', {
+        conversationId: msg.conversationId,
+        messageIds: [msg.id],
+      });
+    };
+
     s.on('connect', () => {
       setConnected(true);
+      s.emit('message:sync_delivered');
     });
+
+    s.on('message:new', (msg: Message) => {
+      acknowledgeDelivered(msg);
+    });
+
+    s.on(
+      'conversation:activity',
+      (payload: { conversationId?: string; message?: Message }) => {
+        if (payload?.message) {
+          acknowledgeDelivered(payload.message);
+        }
+      }
+    );
 
     s.on('disconnect', () => {
       setConnected(false);

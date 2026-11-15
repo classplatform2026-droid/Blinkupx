@@ -3,97 +3,22 @@ import { Types } from 'mongoose';
 import type { AuthenticatedRequest } from '../middleware/auth.ts';
 import { Community } from '../models/Community.ts';
 import { Conversation } from '../models/Conversation.ts';
-import { Message, type IMessage } from '../models/Message.ts';
-import { User } from '../models/User.ts';
+import { Message } from '../models/Message.ts';
 import {
-  getBlockRelationship,
+  createAndDispatchMessage,
+  serializeMessage,
+} from '../services/messageService.ts';
+import {
   getViewerRelationshipContext,
   PUBLIC_USER_SELECT,
-  serializeUserWithPrivacy,
-  type PrivacyTargetUserLike,
-  type ViewerRelationshipContext,
 } from '../services/privacyService.ts';
-import { getIO, isUserConnected } from '../sockets/index.ts';
+import { getIO } from '../sockets/index.ts';
 import { AppError } from '../utils/errors.ts';
 import { extractAndFetchLinkPreviews } from '../utils/linkPreview.ts';
-import { resolveUserSettings } from '../utils/serializers.ts';
 import {
   editMessageSchema,
   reactionSchema,
-  sendMessageSchema,
 } from '../validators/schemas.ts';
-
-function serializeMessage(msg: IMessage, viewerContext?: ViewerRelationshipContext) {
-  const rawSender = msg.senderId as unknown;
-  const senderObj =
-    typeof rawSender === 'object' && rawSender !== null && 'fullName' in rawSender
-      ? (rawSender as PrivacyTargetUserLike)
-      : null;
-
-  const senderSerialized = senderObj
-    ? viewerContext
-      ? serializeUserWithPrivacy(senderObj, viewerContext)
-      : {
-          id: senderObj._id.toString(),
-          fullName: senderObj.fullName,
-          username: senderObj.username,
-          avatar: senderObj.avatar || '',
-        }
-    : null;
-
-  const rawReply = msg.replyTo as unknown;
-  const replyObj =
-    typeof rawReply === 'object' && rawReply !== null && 'content' in rawReply
-      ? (rawReply as {
-          _id: { toString(): string };
-          content: string;
-          messageType: string;
-          deletedAt?: Date | null;
-          senderId?: { _id?: { toString(): string }; fullName?: string; username?: string };
-        })
-      : null;
-
-  const isDeleted = Boolean(msg.deletedAt);
-
-  return {
-    id: msg._id.toString(),
-    conversationId: msg.conversationId.toString(),
-    senderId: senderObj ? senderObj._id.toString() : String(msg.senderId),
-    sender: senderSerialized
-      ? {
-          id: senderSerialized.id,
-          fullName: senderSerialized.fullName,
-          username: senderSerialized.username,
-          avatar: senderSerialized.avatar || '',
-        }
-      : null,
-    content: isDeleted ? 'This message was deleted' : msg.content,
-    messageType: msg.messageType,
-    attachments: isDeleted ? [] : msg.attachments,
-    links: isDeleted ? [] : msg.links || [],
-    replyTo: replyObj
-      ? {
-          id: replyObj._id.toString(),
-          content: replyObj.deletedAt ? 'This message was deleted' : replyObj.content,
-          messageType: replyObj.messageType,
-          senderName: replyObj.senderId?.fullName || 'User',
-        }
-      : null,
-    forwardedFrom: isDeleted ? null : msg.forwardedFrom,
-    reactions: isDeleted
-      ? []
-      : msg.reactions.map((r) => ({
-          emoji: r.emoji,
-          userIds: r.userIds.map((id) => id.toString()),
-        })),
-    editedAt: msg.editedAt,
-    deletedAt: msg.deletedAt,
-    deliveredTo: msg.deliveredTo.map((id) => id.toString()),
-    readBy: msg.readBy.map((id) => id.toString()),
-    deliveryStatus: msg.deliveryStatus,
-    createdAt: msg.createdAt,
-  };
-}
 
 export async function listMessages(req: AuthenticatedRequest, res: Response) {
   const userId = req.userId!;
@@ -157,177 +82,17 @@ export async function listMessages(req: AuthenticatedRequest, res: Response) {
 }
 
 export async function sendMessage(req: AuthenticatedRequest, res: Response) {
-  const userId = req.userId!;
-  const parsed = sendMessageSchema.parse(req.body);
-
-  const conv = await Conversation.findOne({
-    _id: parsed.conversationId,
-    'participants.userId': new Types.ObjectId(userId),
-  });
-  if (!conv) {
-    throw new AppError('Conversation not found or access denied.', 404, 'CONVERSATION_NOT_FOUND');
-  }
-
-  if (conv.type === 'direct') {
-    const peer = conv.participants.find((p) => p.userId.toString() !== userId);
-    if (peer) {
-      const blockRel = await getBlockRelationship(userId, peer.userId.toString());
-      if (blockRel.blocked) {
-        throw new AppError(
-          blockRel.blockedByA
-            ? 'You blocked this contact. Unblock them to send messages.'
-            : 'You cannot send messages to this user.',
-          403,
-          'USER_BLOCKED'
-        );
-      }
-    }
-  }
-
-  if (conv.communityId) {
-    const community = await Community.findById(conv.communityId).select('members settings');
-    if (community?.settings?.whoCanPost === 'moderators_only') {
-      const member = community.members.find((m) => m.userId.toString() === userId);
-      if (!member || !['owner', 'admin', 'moderator'].includes(member.role)) {
-        throw new AppError(
-          'Only moderators, admins, and the owner can send messages in this community.',
-          403,
-          'POSTING_RESTRICTED'
-        );
-      }
-    }
-  }
-
-  const hasText = parsed.content.trim().length > 0;
-  const hasAttachments = parsed.attachments.length > 0;
-  if (!hasText && !hasAttachments) {
-    throw new AppError('Message content or attachment is required.', 400, 'EMPTY_MESSAGE');
-  }
-
-  const otherParticipantIds = conv.participants
-    .map((p) => p.userId.toString())
-    .filter((id) => id !== userId);
-
-  const onlineRecipientIds = otherParticipantIds
-    .filter((id) => isUserConnected(id))
-    .map((id) => new Types.ObjectId(id));
-
-  const initialStatus = onlineRecipientIds.length > 0 ? 'delivered' : 'sent';
-  const links = hasText
-    ? await extractAndFetchLinkPreviews(parsed.content.trim())
-    : [];
-
-  const msg = await Message.create({
-    conversationId: conv._id,
-    senderId: new Types.ObjectId(userId),
-    content: parsed.content.trim(),
-    messageType: parsed.messageType,
-    attachments: parsed.attachments,
-    links,
-    replyTo: parsed.replyTo ? new Types.ObjectId(parsed.replyTo) : null,
-    forwardedFrom: parsed.forwardedFrom
-      ? {
-          messageId: new Types.ObjectId(parsed.forwardedFrom.messageId),
-          senderName: parsed.forwardedFrom.senderName,
-        }
-      : null,
-    deliveredTo: onlineRecipientIds,
-    readBy: [new Types.ObjectId(userId)],
-    deliveryStatus: initialStatus,
+  const result = await createAndDispatchMessage({
+    userId: req.userId!,
+    senderFullName: req.user?.fullName,
+    body: req.body,
+    io: getIO(),
   });
 
-  const previewText =
-    parsed.content.trim() ||
-    (parsed.messageType === 'voice'
-      ? 'Voice message'
-      : parsed.messageType === 'image'
-        ? 'Photo'
-        : parsed.messageType === 'video'
-          ? 'Video'
-          : 'Document');
-
-  conv.lastMessage = {
-    messageId: msg._id as Types.ObjectId,
-    senderId: new Types.ObjectId(userId),
-    content: previewText.slice(0, 140),
-    messageType: parsed.messageType,
-    createdAt: msg.createdAt,
-  };
-
-  // Reopen conversation for any participant who previously deleted it, and mark sender as read
-  for (const part of conv.participants) {
-    part.deletedAt = null;
-    if (part.userId.toString() === userId) {
-      part.lastReadAt = new Date();
-    }
-  }
-  await conv.save();
-
-  const populated = await Message.findById(msg._id)
-    .populate('senderId', PUBLIC_USER_SELECT)
-    .populate({
-      path: 'replyTo',
-      select: 'content messageType deletedAt senderId',
-      populate: { path: 'senderId', select: 'fullName username' },
-    });
-
-  const serialized = serializeMessage(populated!);
-
-  const io = getIO();
-  if (io) {
-    io.to(`conversation:${conv._id.toString()}`).emit('message:new', serialized);
-
-    const recipients = await User.find({ _id: { $in: otherParticipantIds } })
-      .select('settings blockedUsers')
-      .lean();
-    const recipientMap = new Map(recipients.map((r) => [r._id.toString(), r]));
-    const now = new Date();
-    const senderName = req.user?.fullName || serialized.sender?.fullName || 'New message';
-
-    for (const pid of otherParticipantIds) {
-      const recipient = recipientMap.get(pid);
-      const isBlockedRecipient = Boolean(
-        recipient?.blockedUsers?.some((id) => id.toString() === userId)
-      );
-      if (isBlockedRecipient) continue;
-
-      io.to(`user:${pid}`).emit('conversation:activity', {
-        conversationId: conv._id.toString(),
-        message: serialized,
-      });
-
-      const part = conv.participants.find((p) => p.userId.toString() === pid);
-      const isMuted = Boolean(part?.mutedUntil && part.mutedUntil > now);
-      if (isMuted) continue;
-
-      const notif = resolveUserSettings(recipient?.settings).notifications;
-      const categoryEnabled =
-        conv.type === 'direct'
-          ? notif.privateMessages
-          : conv.type === 'group'
-            ? notif.groupMessages
-            : notif.communityMessages;
-
-      if (!categoryEnabled) continue;
-
-      const showPreview = notif.messagePreview;
-      io.to(`user:${pid}`).emit('notification:message', {
-        id: serialized.id,
-        conversationId: conv._id.toString(),
-        conversationType: conv.type,
-        communityId: conv.communityId ? conv.communityId.toString() : null,
-        title: conv.type === 'direct' ? senderName : `${senderName} • ${conv.name}`,
-        body: showPreview ? previewText.slice(0, 120) : 'New message',
-        previewHidden: !showPreview,
-        soundEnabled: notif.soundEnabled,
-        soundTone: notif.soundTone,
-        vibrationEnabled: notif.vibrationEnabled,
-        createdAt: serialized.createdAt,
-      });
-    }
-  }
-
-  res.status(201).json({ success: true, data: serialized });
+  res.status(result.duplicate ? 200 : 201).json({
+    success: true,
+    data: result.message,
+  });
 }
 
 export async function editMessage(req: AuthenticatedRequest, res: Response) {

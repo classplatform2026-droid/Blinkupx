@@ -371,6 +371,7 @@ export const messageApi = {
   },
   send: async (payload: {
     conversationId: string;
+    clientMessageId?: string;
     content?: string;
     messageType?: 'text' | 'image' | 'video' | 'document' | 'voice';
     attachments?: MessageAttachment[];

@@ -1,7 +1,9 @@
 import React, { useRef, useState } from 'react';
 import {
+  AlertCircle,
   Check,
   CheckCheck,
+  Clock,
   Copy,
   Download,
   Edit3,
@@ -10,6 +12,7 @@ import {
   MoreHorizontal,
   Pin,
   Reply,
+  RotateCcw,
   SmilePlus,
   Trash2,
 } from 'lucide-react';
@@ -66,6 +69,8 @@ interface MessageBubbleProps {
   onPin?: (message: Message) => void;
   onCopy: (text: string) => void;
   onPreviewImage: (url: string) => void;
+  onRetry?: (message: Message) => void;
+  onDismissFailed?: (message: Message) => void;
 }
 
 export function MessageBubble({
@@ -84,6 +89,8 @@ export function MessageBubble({
   onPin,
   onCopy,
   onPreviewImage,
+  onRetry,
+  onDismissFailed,
 }: MessageBubbleProps) {
   const { showToast } = useToast();
   const [menuOpen, setMenuOpen] = useState(false);
@@ -94,6 +101,9 @@ export function MessageBubble({
   const longPressTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const tryAuthenticatedMediaFallback = async (idx: number) => {
+    if (message.deliveryStatus === 'sending' || message.deliveryStatus === 'failed') {
+      return;
+    }
     if (fallbackUrls[idx] !== undefined) return;
     setFallbackUrls((prev) => ({ ...prev, [idx]: '' }));
     try {
@@ -115,8 +125,12 @@ export function MessageBubble({
   }
 
   const isDeleted = Boolean(message.deletedAt);
+  const isSending = message.deliveryStatus === 'sending';
+  const isFailed = message.deliveryStatus === 'failed';
+  const isPendingOrFailed = isSending || isFailed;
 
   const handlePointerDown = (e: React.PointerEvent) => {
+    if (isPendingOrFailed) return;
     pointerStartX.current = e.clientX;
     if (e.pointerType === 'touch') {
       longPressTimer.current = setTimeout(() => {
@@ -126,7 +140,7 @@ export function MessageBubble({
   };
 
   const handlePointerMove = (e: React.PointerEvent) => {
-    if (pointerStartX.current === null) return;
+    if (pointerStartX.current === null || isPendingOrFailed) return;
     const dx = e.clientX - pointerStartX.current;
     if (Math.abs(dx) > 8 && longPressTimer.current) {
       clearTimeout(longPressTimer.current);
@@ -142,7 +156,7 @@ export function MessageBubble({
       clearTimeout(longPressTimer.current);
       longPressTimer.current = null;
     }
-    if (swipeOffset > 44 && !isDeleted) {
+    if (swipeOffset > 44 && !isDeleted && !isPendingOrFailed) {
       onReply(message);
     }
     pointerStartX.current = null;
@@ -186,6 +200,7 @@ export function MessageBubble({
         onPointerUp={handlePointerUp}
         onPointerCancel={handlePointerUp}
         onContextMenu={(e) => {
+          if (isPendingOrFailed) return;
           e.preventDefault();
           setMenuOpen((prev) => !prev);
           setReactOpen(false);
@@ -210,7 +225,7 @@ export function MessageBubble({
         )}
 
         <div className="flex items-end gap-1.5">
-          {isOwn && !isDeleted && (
+          {isOwn && !isDeleted && !isPendingOrFailed && (
             <div className="opacity-0 group-hover:opacity-100 focus-within:opacity-100 transition-opacity flex items-center gap-0.5 pb-1">
               <button
                 type="button"
@@ -238,11 +253,15 @@ export function MessageBubble({
           )}
 
           <div
-            className={`rounded-2xl px-3.5 py-2.5 text-sm leading-relaxed break-words ${
+            className={`rounded-2xl px-3.5 py-2.5 text-sm leading-relaxed break-words transition-opacity ${
               isDeleted
                 ? 'bg-[#202020] border border-[#303030] text-[#999999] italic'
                 : isOwn
-                  ? 'bg-[#FFFFFF] text-[#181818]'
+                  ? isFailed
+                    ? 'bg-[#FFFFFF] text-[#181818] ring-1 ring-[#E5484D]'
+                    : isSending
+                      ? 'bg-[#FFFFFF]/90 text-[#181818]'
+                      : 'bg-[#FFFFFF] text-[#181818]'
                   : 'bg-[#242424] text-[#FFFFFF] border border-[#303030]'
             }`}
           >
@@ -344,6 +363,7 @@ export function MessageBubble({
                     key={`${att.url}-${idx}`}
                     type="button"
                     onClick={() => {
+                      if (isPendingOrFailed || att.url.startsWith('blob:')) return;
                       mediaApi
                         .downloadAttachment(message.id, idx, att.fileName || 'attachment')
                         .catch((err) => showToast(extractApiError(err).message, 'error'));
@@ -384,20 +404,38 @@ export function MessageBubble({
               {message.editedAt && !isDeleted && <span>edited</span>}
               <span>{formatTime(message.createdAt)}</span>
               {isOwn && !isDeleted && (
-                <span aria-label={message.deliveryStatus}>
-                  {message.deliveryStatus === 'read' ? (
-                    <CheckCheck className="w-3.5 h-3.5 text-[#22C55E]" />
+                <span
+                  aria-label={message.deliveryStatus}
+                  title={
+                    message.deliveryStatus === 'sending'
+                      ? 'Sending...'
+                      : message.deliveryStatus === 'sent'
+                        ? 'Sent'
+                        : message.deliveryStatus === 'delivered'
+                          ? 'Delivered'
+                          : message.deliveryStatus === 'read'
+                            ? 'Read'
+                            : 'Failed to send'
+                  }
+                  className="inline-flex items-center"
+                >
+                  {message.deliveryStatus === 'sending' ? (
+                    <Clock className="w-3.5 h-3.5 text-[#777777]" />
+                  ) : message.deliveryStatus === 'failed' ? (
+                    <AlertCircle className="w-3.5 h-3.5 text-[#E5484D]" />
+                  ) : message.deliveryStatus === 'read' ? (
+                    <CheckCheck className="w-3.5 h-3.5 text-[#2563EB]" />
                   ) : message.deliveryStatus === 'delivered' ? (
-                    <CheckCheck className="w-3.5 h-3.5" />
+                    <CheckCheck className="w-3.5 h-3.5 text-[#777777]" />
                   ) : (
-                    <Check className="w-3.5 h-3.5" />
+                    <Check className="w-3.5 h-3.5 text-[#777777]" />
                   )}
                 </span>
               )}
             </div>
           </div>
 
-          {!isOwn && !isDeleted && (
+          {!isOwn && !isDeleted && !isPendingOrFailed && (
             <div className="opacity-0 group-hover:opacity-100 focus-within:opacity-100 transition-opacity flex items-center gap-0.5 pb-1">
               <button
                 type="button"
@@ -424,6 +462,33 @@ export function MessageBubble({
             </div>
           )}
         </div>
+
+        {isOwn && isFailed && !isDeleted && (
+          <div className="flex items-center gap-2.5 mt-1 px-1 text-xs">
+            <span className="text-[#E5484D]">
+              {message.localError || 'Not sent'}
+            </span>
+            {onRetry && (
+              <button
+                type="button"
+                onClick={() => onRetry(message)}
+                className="inline-flex items-center gap-1 font-medium text-[#FFFFFF] hover:underline cursor-pointer"
+              >
+                <RotateCcw className="w-3 h-3" />
+                <span>Retry</span>
+              </button>
+            )}
+            {onDismissFailed && (
+              <button
+                type="button"
+                onClick={() => onDismissFailed(message)}
+                className="text-[#999999] hover:text-[#FFFFFF] cursor-pointer"
+              >
+                Remove
+              </button>
+            )}
+          </div>
+        )}
 
         {!isDeleted && message.reactions.length > 0 && (
           <div className="flex flex-wrap gap-1 mt-1 px-1">

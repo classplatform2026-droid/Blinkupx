@@ -104,6 +104,7 @@ export const createConversationSchema = z.object({
 
 export const sendMessageSchema = z.object({
   conversationId: z.string().min(1),
+  clientMessageId: z.string().trim().min(1).max(120).optional().nullable(),
   content: z.string().max(5000).optional().default(''),
   messageType: z
     .enum(['text', 'image', 'video', 'document', 'voice'])

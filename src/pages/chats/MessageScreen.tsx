@@ -17,7 +17,7 @@ import {
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { DropdownMenu } from '../../components/DropdownMenu';
 import { MessageBubble } from '../../components/MessageBubble';
-import { MessageInput } from '../../components/MessageInput';
+import { MessageInput, type OutgoingMessagePayload } from '../../components/MessageInput';
 import { Modal } from '../../components/Modal';
 import { PrimaryButton } from '../../components/PrimaryButton';
 import { SharedMediaPanel } from '../../components/SharedMediaPanel';
@@ -29,11 +29,22 @@ import { useToast } from '../../context/ToastContext';
 import {
   conversationApi,
   extractApiError,
+  mediaApi,
   messageApi,
   userApi,
 } from '../../services/api';
-import type { Conversation, Message, MessageAttachment } from '../../types';
+import type { Conversation, Message, MessageAttachment, MessageLinkPreview } from '../../types';
 import { formatDateSeparator, formatLastSeen } from '../../utils/formatters';
+import {
+  createOptimisticMessage,
+  dispatchMessageToServer,
+  formatSendErrorMessage,
+  generateClientMessageId,
+  markOptimisticFailed,
+  markOptimisticSending,
+  reconcileIncomingMessage,
+  removeOptimisticMessage,
+} from '../../utils/optimisticMessages';
 
 export function MessageScreen({ conversationId }: { conversationId: string }) {
   const navigate = useNavigate();
@@ -69,6 +80,39 @@ export function MessageScreen({ conversationId }: { conversationId: string }) {
 
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
+  const localMediaFilesRef = useRef<
+    Record<string, { file: Blob | File; duration?: number; blobUrl?: string }>
+  >({});
+  const uploadedAttachmentsRef = useRef<Record<string, MessageAttachment[]>>({});
+  const inFlightSendRef = useRef<Set<string>>(new Set());
+
+  const cleanupLocalResources = useCallback((clientMessageId?: string | null) => {
+    if (!clientMessageId) return;
+    const entry = localMediaFilesRef.current[clientMessageId];
+    if (entry?.blobUrl) {
+      URL.revokeObjectURL(entry.blobUrl);
+    }
+    delete localMediaFilesRef.current[clientMessageId];
+    delete uploadedAttachmentsRef.current[clientMessageId];
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      Object.values(localMediaFilesRef.current).forEach((entry) => {
+        if (entry.blobUrl) URL.revokeObjectURL(entry.blobUrl);
+      });
+      localMediaFilesRef.current = {};
+      uploadedAttachmentsRef.current = {};
+    };
+  }, []);
+
+  const emitReadIfVisible = useCallback(() => {
+    if (!socket) return;
+    if (typeof document !== 'undefined' && document.visibilityState !== 'visible') {
+      return;
+    }
+    socket.emit('message:read', { conversationId });
+  }, [socket, conversationId]);
 
   const loadThread = useCallback(async () => {
     setError(null);
@@ -89,17 +133,31 @@ export function MessageScreen({ conversationId }: { conversationId: string }) {
       }
 
       socket?.emit('group:join', { conversationId });
-      socket?.emit('message:read', { conversationId });
+      emitReadIfVisible();
     } catch (err) {
       setError(extractApiError(err).message);
     } finally {
       setLoading(false);
     }
-  }, [conversationId, highlightId, socket]);
+  }, [conversationId, highlightId, socket, emitReadIfVisible]);
 
   useEffect(() => {
     loadThread();
   }, [loadThread]);
+
+  useEffect(() => {
+    const handleVisibilityOrFocus = () => {
+      if (document.visibilityState === 'visible') {
+        emitReadIfVisible();
+      }
+    };
+    window.addEventListener('focus', handleVisibilityOrFocus);
+    document.addEventListener('visibilitychange', handleVisibilityOrFocus);
+    return () => {
+      window.removeEventListener('focus', handleVisibilityOrFocus);
+      document.removeEventListener('visibilitychange', handleVisibilityOrFocus);
+    };
+  }, [emitReadIfVisible]);
 
   useEffect(() => {
     const refreshConversationMeta = async () => {
@@ -140,23 +198,32 @@ export function MessageScreen({ conversationId }: { conversationId: string }) {
 
     const onNewMessage = (msg: Message) => {
       if (msg.conversationId !== conversationId) return;
+      cleanupLocalResources(msg.clientMessageId);
       if (!hasNewerMessages) {
-        setMessages((prev) => {
-          if (prev.some((m) => m.id === msg.id)) return prev;
-          return [...prev, msg];
-        });
+        setMessages((prev) => reconcileIncomingMessage(prev, msg));
         setTimeout(() => {
           bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
         }, 40);
       }
       if (msg.senderId !== user?.id) {
-        socket.emit('message:read', { conversationId });
+        emitReadIfVisible();
       }
     };
 
     const onEditMessage = (updated: Message) => {
       if (updated.conversationId !== conversationId) return;
       setMessages((prev) => prev.map((m) => (m.id === updated.id ? updated : m)));
+    };
+
+    const onMessageLinks = (payload: {
+      id: string;
+      conversationId: string;
+      links: MessageLinkPreview[];
+    }) => {
+      if (payload.conversationId !== conversationId) return;
+      setMessages((prev) =>
+        prev.map((m) => (m.id === payload.id ? { ...m, links: payload.links } : m))
+      );
     };
 
     const onDeleteMessage = (payload: {
@@ -183,14 +250,22 @@ export function MessageScreen({ conversationId }: { conversationId: string }) {
     const onDelivered = (payload: {
       conversationId: string;
       messageIds: string[];
+      userId?: string;
     }) => {
       if (payload.conversationId !== conversationId) return;
       setMessages((prev) =>
-        prev.map((m) =>
-          payload.messageIds.includes(m.id) && m.deliveryStatus === 'sent'
-            ? { ...m, deliveryStatus: 'delivered' }
-            : m
-        )
+        prev.map((m) => {
+          if (!payload.messageIds.includes(m.id)) return m;
+          const nextDeliveredTo =
+            payload.userId && !m.deliveredTo.includes(payload.userId)
+              ? [...m.deliveredTo, payload.userId]
+              : m.deliveredTo;
+          return {
+            ...m,
+            deliveredTo: nextDeliveredTo,
+            deliveryStatus: m.deliveryStatus === 'sent' ? 'delivered' : m.deliveryStatus,
+          };
+        })
       );
     };
 
@@ -206,6 +281,9 @@ export function MessageScreen({ conversationId }: { conversationId: string }) {
             ? {
                 ...m,
                 deliveryStatus: 'read',
+                deliveredTo: m.deliveredTo.includes(payload.userId)
+                  ? m.deliveredTo
+                  : [...m.deliveredTo, payload.userId],
                 readBy: m.readBy.includes(payload.userId)
                   ? m.readBy
                   : [...m.readBy, payload.userId],
@@ -240,6 +318,7 @@ export function MessageScreen({ conversationId }: { conversationId: string }) {
 
     socket.on('message:new', onNewMessage);
     socket.on('message:edit', onEditMessage);
+    socket.on('message:links', onMessageLinks);
     socket.on('message:delete', onDeleteMessage);
     socket.on('message:delivered', onDelivered);
     socket.on('message:read', onRead);
@@ -250,6 +329,7 @@ export function MessageScreen({ conversationId }: { conversationId: string }) {
     return () => {
       socket.off('message:new', onNewMessage);
       socket.off('message:edit', onEditMessage);
+      socket.off('message:links', onMessageLinks);
       socket.off('message:delete', onDeleteMessage);
       socket.off('message:delivered', onDelivered);
       socket.off('message:read', onRead);
@@ -257,7 +337,7 @@ export function MessageScreen({ conversationId }: { conversationId: string }) {
       socket.off('reaction:remove', onReaction);
       socket.off('conversation:updated', onConvUpdated);
     };
-  }, [socket, conversationId, user?.id, hasNewerMessages]);
+  }, [socket, conversationId, user?.id, hasNewerMessages, cleanupLocalResources, emitReadIfVisible]);
 
   const loadOlder = async () => {
     if (!hasMore || loadingOlder || messages.length === 0) return;
@@ -281,35 +361,159 @@ export function MessageScreen({ conversationId }: { conversationId: string }) {
     }
   };
 
-  const handleSendMessage = async (payload: {
+  const performSendAttempt = async (params: {
+    clientMessageId: string;
     content?: string;
     messageType: 'text' | 'image' | 'video' | 'document' | 'voice';
     attachments?: MessageAttachment[];
+    replyTo?: string | null;
   }) => {
-    const created = await messageApi.send({
-      conversationId,
-      content: payload.content,
-      messageType: payload.messageType,
-      attachments: payload.attachments,
-      replyTo: replyingTo?.id || null,
-    });
+    const { clientMessageId, content, messageType, replyTo } = params;
+    if (inFlightSendRef.current.has(clientMessageId)) return;
+    inFlightSendRef.current.add(clientMessageId);
+
+    try {
+      let resolvedAttachments =
+        uploadedAttachmentsRef.current[clientMessageId] || params.attachments || [];
+
+      const localEntry = localMediaFilesRef.current[clientMessageId];
+      if (localEntry && !uploadedAttachmentsRef.current[clientMessageId]) {
+        const folder = messageType === 'voice' ? 'voice' : 'messages';
+        const fileNameOverride =
+          messageType === 'voice' ? `voice-${Date.now()}.webm` : undefined;
+        const uploaded = await mediaApi.upload(
+          localEntry.file,
+          folder,
+          undefined,
+          fileNameOverride
+        );
+        if (localEntry.duration) {
+          uploaded.duration = localEntry.duration;
+        }
+        resolvedAttachments = [uploaded];
+        uploadedAttachmentsRef.current[clientMessageId] = resolvedAttachments;
+      }
+
+      const created = await dispatchMessageToServer({
+        socket,
+        payload: {
+          conversationId,
+          clientMessageId,
+          content,
+          messageType,
+          attachments: resolvedAttachments,
+          replyTo,
+        },
+      });
+
+      cleanupLocalResources(clientMessageId);
+
+      if (hasNewerMessages) {
+        const latest = await messageApi.list(conversationId);
+        setMessages(latest.messages);
+        setHasMore(latest.hasMore);
+        setHasNewerMessages(false);
+      } else {
+        setMessages((prev) => reconcileIncomingMessage(prev, created));
+      }
+
+      window.dispatchEvent(
+        new CustomEvent('blinkupz:shared-media-refresh', { detail: { conversationId } })
+      );
+    } catch (err) {
+      const errorMsg = formatSendErrorMessage(err);
+      setMessages((prev) => markOptimisticFailed(prev, clientMessageId, errorMsg));
+    } finally {
+      inFlightSendRef.current.delete(clientMessageId);
+    }
+  };
+
+  const handleSendMessage = (payload: OutgoingMessagePayload) => {
+    if (!user) return;
+    const clientMessageId = generateClientMessageId();
+    const replySnapshot = replyingTo;
     setReplyingTo(null);
+
+    let initialAttachments: MessageAttachment[] = payload.attachments || [];
+    if (payload.localFile) {
+      const blobUrl = URL.createObjectURL(payload.localFile);
+      const fileObj = payload.localFile;
+      const fileName =
+        'name' in fileObj && typeof fileObj.name === 'string'
+          ? fileObj.name
+          : payload.messageType === 'voice'
+            ? 'Voice message'
+            : 'attachment';
+
+      localMediaFilesRef.current[clientMessageId] = {
+        file: fileObj,
+        duration: payload.duration,
+        blobUrl,
+      };
+      initialAttachments = [
+        {
+          url: blobUrl,
+          publicId: '',
+          fileName,
+          fileSize: fileObj.size || 0,
+          mimeType: fileObj.type || '',
+          duration: payload.duration,
+        },
+      ];
+    }
+
+    const optimistic = createOptimisticMessage({
+      clientMessageId,
+      conversationId,
+      sender: user,
+      content: payload.content || '',
+      messageType: payload.messageType,
+      attachments: initialAttachments,
+      replyTo: replySnapshot,
+      duration: payload.duration,
+    });
+
     if (hasNewerMessages) {
-      const latest = await messageApi.list(conversationId);
-      setMessages(latest.messages);
-      setHasMore(latest.hasMore);
+      setMessages([optimistic]);
       setHasNewerMessages(false);
     } else {
-      setMessages((prev) =>
-        prev.some((m) => m.id === created.id) ? prev : [...prev, created]
-      );
+      setMessages((prev) => [...prev, optimistic]);
     }
-    window.dispatchEvent(
-      new CustomEvent('blinkupz:shared-media-refresh', { detail: { conversationId } })
-    );
-    setTimeout(() => {
+
+    requestAnimationFrame(() => {
       bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
-    }, 30);
+    });
+
+    void performSendAttempt({
+      clientMessageId,
+      content: payload.content,
+      messageType: payload.messageType,
+      attachments: payload.localFile ? undefined : payload.attachments,
+      replyTo: replySnapshot?.id || null,
+    });
+  };
+
+  const handleRetryMessage = (msg: Message) => {
+    const cid = msg.clientMessageId || msg.id;
+    if (!cid || inFlightSendRef.current.has(cid)) return;
+    setMessages((prev) => markOptimisticSending(prev, cid));
+    void performSendAttempt({
+      clientMessageId: cid,
+      content: msg.retryPayload?.content ?? msg.content,
+      messageType:
+        msg.retryPayload?.messageType ??
+        (msg.messageType === 'system' ? 'text' : msg.messageType),
+      attachments: localMediaFilesRef.current[cid]
+        ? undefined
+        : msg.retryPayload?.attachments ?? msg.attachments,
+      replyTo: msg.retryPayload?.replyTo ?? msg.replyTo?.id ?? null,
+    });
+  };
+
+  const handleDismissFailed = (msg: Message) => {
+    const cid = msg.clientMessageId || msg.id;
+    cleanupLocalResources(cid);
+    setMessages((prev) => removeOptimisticMessage(prev, msg.id));
   };
 
   const handleSaveEdit = async (messageId: string, content: string) => {
@@ -824,6 +1028,8 @@ export function MessageScreen({ conversationId }: { conversationId: string }) {
                     showToast('Copied to clipboard.', 'info');
                   }}
                   onPreviewImage={(url) => setPreviewImage(url)}
+                  onRetry={handleRetryMessage}
+                  onDismissFailed={handleDismissFailed}
                 />
               </React.Fragment>
             );

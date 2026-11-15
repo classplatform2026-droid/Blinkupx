@@ -1,12 +1,16 @@
 import type { Server as HttpServer } from 'node:http';
 import jwt from 'jsonwebtoken';
+import { Types } from 'mongoose';
 import { Server, type Socket } from 'socket.io';
+import { ZodError } from 'zod';
 import { env } from '../config/env.ts';
 import { AUTH_COOKIE_NAME, type JwtPayload } from '../middleware/auth.ts';
 import { Conversation } from '../models/Conversation.ts';
 import { Message } from '../models/Message.ts';
 import { User } from '../models/User.ts';
+import { createAndDispatchMessage } from '../services/messageService.ts';
 import { canViewPrivacyField, getBlockRelationship } from '../services/privacyService.ts';
+import { AppError } from '../utils/errors.ts';
 import { resolveUserSettings } from '../utils/serializers.ts';
 
 let ioInstance: Server | null = null;
@@ -139,16 +143,17 @@ export function initSocketServer(httpServer: HttpServer): Server {
 
       socket.data.userId = user._id.toString();
       socket.data.username = user.username;
+      socket.data.fullName = user.fullName;
       next();
     } catch {
       next(new Error('Invalid session token'));
     }
   });
 
-  io.on('connection', async (socket: Socket) => {
+  io.on('connection', (socket: Socket) => {
     const userId = socket.data.userId as string;
 
-    // Register socket connection
+    // Register socket connection synchronously so early client emits are never dropped
     let set = userSockets.get(userId);
     const wasOffline = !set || set.size === 0;
     if (!set) {
@@ -160,27 +165,30 @@ export function initSocketServer(httpServer: HttpServer): Server {
     // Join personal room for direct notifications & sync
     socket.join(`user:${userId}`);
 
-    // Join all active conversation rooms for this user
-    const conversations = await Conversation.find({
-      'participants.userId': userId,
-    }).select('_id participants');
+    void (async () => {
+      const conversations = await Conversation.find({
+        'participants.userId': userId,
+      }).select('_id participants');
 
-    for (const conv of conversations) {
-      const participant = conv.participants.find(
-        (p) => p.userId.toString() === userId
-      );
-      if (participant && !participant.deletedAt) {
-        socket.join(`conversation:${conv._id.toString()}`);
+      for (const conv of conversations) {
+        const participant = conv.participants.find(
+          (p) => p.userId.toString() === userId
+        );
+        if (participant && !participant.deletedAt) {
+          socket.join(`conversation:${conv._id.toString()}`);
+        }
       }
-    }
 
-    if (wasOffline) {
-      await User.findByIdAndUpdate(userId, {
-        onlineStatus: true,
-        lastSeen: new Date(),
-      });
-      await emitPresenceToAuthorizedViewers(userId);
-    }
+      if (wasOffline) {
+        await User.findByIdAndUpdate(userId, {
+          onlineStatus: true,
+          lastSeen: new Date(),
+        });
+        await emitPresenceToAuthorizedViewers(userId);
+      }
+    })().catch(() => {
+      // Ignore background connection setup failure if socket closed early
+    });
 
     // Join a conversation or group room dynamically after membership verification
     socket.on('group:join', async (payload: { conversationId?: string }) => {
@@ -245,134 +253,380 @@ export function initSocketServer(httpServer: HttpServer): Server {
     });
 
     socket.on(
-      'message:delivered',
-      async (payload: { conversationId?: string; messageIds?: string[] }) => {
-        if (!payload?.conversationId || !Array.isArray(payload.messageIds)) return;
-        const conv = await Conversation.findOne({
-          _id: payload.conversationId,
-          'participants.userId': userId,
-        }).select('_id type participants.userId');
-        if (!conv) return;
-
-        if (conv.type === 'direct') {
-          const peer = conv.participants.find((p) => p.userId.toString() !== userId);
-          if (peer) {
-            const rel = await getBlockRelationship(userId, peer.userId.toString());
-            if (rel.blocked) return;
+      'message:send',
+      async (
+        payload: unknown,
+        ack?: (res: { ok: boolean; data?: unknown; code?: string; message?: string }) => void
+      ) => {
+        try {
+          const result = await createAndDispatchMessage({
+            userId,
+            senderFullName: socket.data.fullName as string | undefined,
+            body: payload,
+            io,
+          });
+          ack?.({ ok: true, data: result.message });
+        } catch (err) {
+          if (err instanceof AppError) {
+            ack?.({ ok: false, code: err.code, message: err.message });
+          } else if (err instanceof ZodError) {
+            ack?.({
+              ok: false,
+              code: 'VALIDATION_ERROR',
+              message: err.issues[0]?.message || 'Invalid message payload.',
+            });
+          } else {
+            ack?.({
+              ok: false,
+              code: 'SEND_FAILED',
+              message: 'Failed to send message.',
+            });
           }
         }
-
-        await Message.updateMany(
-          {
-            _id: { $in: payload.messageIds },
-            conversationId: payload.conversationId,
-            senderId: { $ne: userId },
-          },
-          {
-            $addToSet: { deliveredTo: userId },
-          }
-        );
-
-        await Message.updateMany(
-          {
-            _id: { $in: payload.messageIds },
-            conversationId: payload.conversationId,
-            deliveryStatus: 'sent',
-            senderId: { $ne: userId },
-          },
-          { $set: { deliveryStatus: 'delivered' } }
-        );
-
-        io.to(`conversation:${payload.conversationId}`).emit('message:delivered', {
-          conversationId: payload.conversationId,
-          messageIds: payload.messageIds,
-          userId,
-        });
       }
     );
 
-    socket.on('message:read', async (payload: { conversationId?: string }) => {
-      if (!payload?.conversationId) return;
-      const conv = await Conversation.findOne({
-        _id: payload.conversationId,
-        'participants.userId': userId,
-      });
-      if (!conv) return;
+    socket.on(
+      'message:sync_delivered',
+      async (
+        payloadOrAck?: unknown,
+        maybeAck?: (res: { ok: boolean; count?: number }) => void
+      ) => {
+        const ack =
+          typeof payloadOrAck === 'function'
+            ? (payloadOrAck as (res: { ok: boolean; count?: number }) => void)
+            : maybeAck;
+        try {
+          const userObjectId = new Types.ObjectId(userId);
+          const convs = await Conversation.find({
+            participants: {
+              $elemMatch: {
+                userId: userObjectId,
+                deletedAt: null,
+              },
+            },
+          }).select('_id type participants.userId');
 
-      const user = await User.findById(userId).select('settings');
-      const resolved = resolveUserSettings(user?.settings);
-      const now = new Date();
+          if (convs.length === 0) {
+            ack?.({ ok: true, count: 0 });
+            return;
+          }
 
-      await Conversation.updateOne(
-        { _id: payload.conversationId, 'participants.userId': userId },
-        { $set: { 'participants.$.lastReadAt': now } }
-      );
+          const currentUser = await User.findById(userObjectId)
+            .select('blockedUsers')
+            .lean();
+          const myBlocked = new Set(
+            (currentUser?.blockedUsers || []).map((id) => id.toString())
+          );
 
-      // Keep delivery tracking independent from read receipts
-      const undelivered = await Message.find({
-        conversationId: payload.conversationId,
-        senderId: { $ne: userId },
-        deliveredTo: { $ne: userId },
-      }).select('_id');
+          const allowedConvIds: Types.ObjectId[] = [];
+          const directPeersToCheck: Array<{ convId: Types.ObjectId; peerId: string }> = [];
 
-      if (undelivered.length > 0) {
-        const deliveredIds = undelivered.map((m) => m._id.toString());
-        await Message.updateMany(
-          { _id: { $in: deliveredIds } },
-          { $addToSet: { deliveredTo: userId } }
-        );
-        await Message.updateMany(
-          { _id: { $in: deliveredIds }, deliveryStatus: 'sent' },
-          { $set: { deliveryStatus: 'delivered' } }
-        );
-        io.to(`conversation:${payload.conversationId}`).emit('message:delivered', {
-          conversationId: payload.conversationId,
-          messageIds: deliveredIds,
-          userId,
-        });
+          for (const conv of convs) {
+            if (conv.type === 'direct') {
+              const peer = conv.participants.find(
+                (p) => p.userId.toString() !== userId
+              );
+              if (peer) {
+                const peerId = peer.userId.toString();
+                if (myBlocked.has(peerId)) continue;
+                directPeersToCheck.push({ convId: conv._id as Types.ObjectId, peerId });
+                continue;
+              }
+            }
+            allowedConvIds.push(conv._id as Types.ObjectId);
+          }
+
+          if (directPeersToCheck.length > 0) {
+            const peerDocs = await User.find({
+              _id: { $in: directPeersToCheck.map((d) => d.peerId) },
+            })
+              .select('blockedUsers')
+              .lean();
+            const peerBlockedMap = new Map(
+              peerDocs.map((p) => [
+                p._id.toString(),
+                new Set((p.blockedUsers || []).map((id) => id.toString())),
+              ])
+            );
+            for (const item of directPeersToCheck) {
+              if (!peerBlockedMap.get(item.peerId)?.has(userId)) {
+                allowedConvIds.push(item.convId);
+              }
+            }
+          }
+
+          if (allowedConvIds.length === 0) {
+            ack?.({ ok: true, count: 0 });
+            return;
+          }
+
+          const undelivered = await Message.find({
+            conversationId: { $in: allowedConvIds },
+            senderId: { $ne: userObjectId },
+            deliveredTo: { $ne: userObjectId },
+            deletedAt: null,
+          }).select('_id conversationId senderId');
+
+          if (undelivered.length === 0) {
+            ack?.({ ok: true, count: 0 });
+            return;
+          }
+
+          const msgIds = undelivered.map((m) => m._id);
+          await Promise.all([
+            Message.updateMany(
+              { _id: { $in: msgIds } },
+              { $addToSet: { deliveredTo: userObjectId } }
+            ),
+            Message.updateMany(
+              { _id: { $in: msgIds }, deliveryStatus: 'sent' },
+              { $set: { deliveryStatus: 'delivered' } }
+            ),
+          ]);
+
+          const byConv = new Map<
+            string,
+            { messageIds: string[]; senderIds: Set<string> }
+          >();
+          for (const m of undelivered) {
+            const cid = m.conversationId.toString();
+            const entry = byConv.get(cid) || {
+              messageIds: [],
+              senderIds: new Set<string>(),
+            };
+            entry.messageIds.push(m._id.toString());
+            entry.senderIds.add(m.senderId.toString());
+            byConv.set(cid, entry);
+          }
+
+          for (const [cid, entry] of byConv.entries()) {
+            const eventPayload = {
+              conversationId: cid,
+              messageIds: entry.messageIds,
+              userId,
+            };
+            io.to(`conversation:${cid}`).emit('message:delivered', eventPayload);
+            for (const sid of entry.senderIds) {
+              io.to(`user:${sid}`).emit('message:delivered', eventPayload);
+            }
+          }
+
+          ack?.({ ok: true, count: undelivered.length });
+        } catch {
+          ack?.({ ok: false, count: 0 });
+        }
       }
+    );
 
-      let shouldSendReadReceipt = true;
-      if (conv.type === 'direct') {
-        if (!resolved.privacy.readReceipts) {
-          shouldSendReadReceipt = false;
-        } else {
-          const peer = conv.participants.find((p) => p.userId.toString() !== userId);
-          if (peer) {
-            const rel = await getBlockRelationship(userId, peer.userId.toString());
-            if (rel.blocked) {
-              shouldSendReadReceipt = false;
+    socket.on(
+      'message:delivered',
+      async (
+        payload: { conversationId?: string; messageIds?: string[]; messageId?: string },
+        ack?: (res: { ok: boolean; messageIds?: string[] }) => void
+      ) => {
+        try {
+          const rawIds = Array.isArray(payload?.messageIds)
+            ? payload.messageIds
+            : payload?.messageId
+              ? [payload.messageId]
+              : [];
+          if (!payload?.conversationId || rawIds.length === 0) {
+            ack?.({ ok: false });
+            return;
+          }
+
+          const validMessageIds = rawIds.filter((id) => Types.ObjectId.isValid(id));
+          if (validMessageIds.length === 0 || !Types.ObjectId.isValid(payload.conversationId)) {
+            ack?.({ ok: false });
+            return;
+          }
+
+          const conv = await Conversation.findOne({
+            _id: payload.conversationId,
+            'participants.userId': userId,
+          }).select('_id type participants.userId');
+          if (!conv) {
+            ack?.({ ok: false });
+            return;
+          }
+
+          if (conv.type === 'direct') {
+            const peer = conv.participants.find((p) => p.userId.toString() !== userId);
+            if (peer) {
+              const rel = await getBlockRelationship(userId, peer.userId.toString());
+              if (rel.blocked) {
+                ack?.({ ok: false });
+                return;
+              }
+            }
+          }
+
+          const matching = await Message.find({
+            _id: { $in: validMessageIds },
+            conversationId: payload.conversationId,
+            senderId: { $ne: userId },
+            deletedAt: null,
+          }).select('_id senderId');
+
+          if (matching.length === 0) {
+            ack?.({ ok: true, messageIds: [] });
+            return;
+          }
+
+          const matchedIds = matching.map((m) => m._id.toString());
+          const senderIds = Array.from(new Set(matching.map((m) => m.senderId.toString())));
+
+          await Promise.all([
+            Message.updateMany(
+              { _id: { $in: matchedIds } },
+              { $addToSet: { deliveredTo: userId } }
+            ),
+            Message.updateMany(
+              { _id: { $in: matchedIds }, deliveryStatus: 'sent' },
+              { $set: { deliveryStatus: 'delivered' } }
+            ),
+          ]);
+
+          const eventPayload = {
+            conversationId: payload.conversationId,
+            messageIds: matchedIds,
+            userId,
+          };
+          io.to(`conversation:${payload.conversationId}`).emit(
+            'message:delivered',
+            eventPayload
+          );
+          for (const sid of senderIds) {
+            io.to(`user:${sid}`).emit('message:delivered', eventPayload);
+          }
+          ack?.({ ok: true, messageIds: matchedIds });
+        } catch {
+          ack?.({ ok: false });
+        }
+      }
+    );
+
+    socket.on(
+      'message:read',
+      async (
+        payload: { conversationId?: string },
+        ack?: (res: { ok: boolean; suppressed?: boolean }) => void
+      ) => {
+        if (!payload?.conversationId || !Types.ObjectId.isValid(payload.conversationId)) {
+          ack?.({ ok: false });
+          return;
+        }
+        const conv = await Conversation.findOne({
+          _id: payload.conversationId,
+          'participants.userId': userId,
+        });
+        if (!conv) {
+          ack?.({ ok: false });
+          return;
+        }
+
+        const user = await User.findById(userId).select('settings');
+        const resolved = resolveUserSettings(user?.settings);
+        const now = new Date();
+
+        await Conversation.updateOne(
+          { _id: payload.conversationId, 'participants.userId': userId },
+          { $set: { 'participants.$.lastReadAt': now } }
+        );
+
+        // Keep delivery tracking independent from read receipts
+        const undelivered = await Message.find({
+          conversationId: payload.conversationId,
+          senderId: { $ne: userId },
+          deliveredTo: { $ne: userId },
+          deletedAt: null,
+        }).select('_id senderId');
+
+        if (undelivered.length > 0) {
+          const deliveredIds = undelivered.map((m) => m._id.toString());
+          const deliveredSenders = Array.from(
+            new Set(undelivered.map((m) => m.senderId.toString()))
+          );
+          await Promise.all([
+            Message.updateMany(
+              { _id: { $in: deliveredIds } },
+              { $addToSet: { deliveredTo: userId } }
+            ),
+            Message.updateMany(
+              { _id: { $in: deliveredIds }, deliveryStatus: 'sent' },
+              { $set: { deliveryStatus: 'delivered' } }
+            ),
+          ]);
+          const deliveredPayload = {
+            conversationId: payload.conversationId,
+            messageIds: deliveredIds,
+            userId,
+          };
+          io.to(`conversation:${payload.conversationId}`).emit(
+            'message:delivered',
+            deliveredPayload
+          );
+          for (const sid of deliveredSenders) {
+            io.to(`user:${sid}`).emit('message:delivered', deliveredPayload);
+          }
+        }
+
+        let shouldSendReadReceipt = true;
+        if (conv.type === 'direct') {
+          if (!resolved.privacy.readReceipts) {
+            shouldSendReadReceipt = false;
+          } else {
+            const peer = conv.participants.find((p) => p.userId.toString() !== userId);
+            if (peer) {
+              const rel = await getBlockRelationship(userId, peer.userId.toString());
+              if (rel.blocked) {
+                shouldSendReadReceipt = false;
+              }
             }
           }
         }
-      }
 
-      if (shouldSendReadReceipt) {
-        const unread = await Message.find({
-          conversationId: payload.conversationId,
-          senderId: { $ne: userId },
-          readBy: { $ne: userId },
-        }).select('_id');
-
-        if (unread.length > 0) {
-          const messageIds = unread.map((m) => m._id.toString());
-          await Message.updateMany(
-            { _id: { $in: messageIds } },
-            {
-              $addToSet: { readBy: userId, deliveredTo: userId },
-              $set: { deliveryStatus: 'read' },
-            }
-          );
-
-          io.to(`conversation:${payload.conversationId}`).emit('message:read', {
+        if (shouldSendReadReceipt) {
+          const unread = await Message.find({
             conversationId: payload.conversationId,
-            messageIds,
-            userId,
-            readAt: now,
-          });
+            senderId: { $ne: userId },
+            readBy: { $ne: userId },
+            deletedAt: null,
+          }).select('_id senderId');
+
+          if (unread.length > 0) {
+            const messageIds = unread.map((m) => m._id.toString());
+            const readSenders = Array.from(
+              new Set(unread.map((m) => m.senderId.toString()))
+            );
+            await Message.updateMany(
+              { _id: { $in: messageIds } },
+              {
+                $addToSet: { readBy: userId, deliveredTo: userId },
+                $set: { deliveryStatus: 'read' },
+              }
+            );
+
+            const readPayload = {
+              conversationId: payload.conversationId,
+              messageIds,
+              userId,
+              readAt: now,
+            };
+            io.to(`conversation:${payload.conversationId}`).emit(
+              'message:read',
+              readPayload
+            );
+            for (const sid of readSenders) {
+              io.to(`user:${sid}`).emit('message:read', readPayload);
+            }
+          }
         }
+
+        ack?.({ ok: true, suppressed: !shouldSendReadReceipt });
       }
-    });
+    );
 
     socket.on('disconnect', async () => {
       const existing = userSockets.get(userId);
