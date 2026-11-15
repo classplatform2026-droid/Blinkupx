@@ -51,6 +51,11 @@ async function dispatchEmailOtp(
     </div>
   `;
 
+  const subject =
+    purpose === 'register'
+      ? `${code} is your BlinkUpZ verification code`
+      : `${code} is your BlinkUpZ password reset code`;
+
   const resp = await fetch('https://api.resend.com/emails', {
     method: 'POST',
     headers: {
@@ -60,9 +65,9 @@ async function dispatchEmailOtp(
     body: JSON.stringify({
       from: env.otp.emailFrom,
       to: [email],
-      subject: `${code} is your BlinkUpZ verification code`,
+      subject,
       html,
-      text: `Your BlinkUpZ verification code is ${code}. It expires in 5 minutes.`,
+      text: `${actionLabel}: your BlinkUpZ code is ${code}. It expires in 5 minutes.`,
     }),
   });
 

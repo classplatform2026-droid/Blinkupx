@@ -48,7 +48,11 @@ export const env = {
   otp: {
     provider: detectedOtpProvider,
     resendApiKey: process.env.RESEND_API_KEY || '',
-    emailFrom: process.env.EMAIL_FROM || 'onboarding@resend.dev',
+    emailFrom: (
+      process.env.EMAIL_FROM || 'BlinkUpZ <noreply@blinkupx.zumooflex.shop>'
+    )
+      .trim()
+      .replace(/^["']|["']$/g, ''),
     twilioAccountSid: process.env.TWILIO_ACCOUNT_SID || '',
     twilioAuthToken: process.env.TWILIO_AUTH_TOKEN || '',
     twilioPhoneNumber: process.env.TWILIO_PHONE_NUMBER || '',

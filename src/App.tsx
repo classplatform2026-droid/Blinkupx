@@ -4,6 +4,7 @@ import { AuthProvider, useAuth } from './context/AuthContext';
 import { SocketProvider } from './context/SocketContext';
 import { ToastProvider } from './context/ToastContext';
 import { AppLayout } from './layouts/AppLayout';
+import { ForgotPasswordPage } from './pages/auth/ForgotPasswordPage';
 import { LoginPage } from './pages/auth/LoginPage';
 import { SignUpPage } from './pages/auth/SignUpPage';
 import { VerifyOtpPage } from './pages/auth/VerifyOtpPage';
@@ -96,6 +97,14 @@ export default function App() {
                 element={
                   <GuestRoute>
                     <LoginPage />
+                  </GuestRoute>
+                }
+              />
+              <Route
+                path="/forgot-password"
+                element={
+                  <GuestRoute>
+                    <ForgotPasswordPage />
                   </GuestRoute>
                 }
               />

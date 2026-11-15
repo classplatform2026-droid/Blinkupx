@@ -5,6 +5,8 @@ import {
   clearAuthCookie,
   setAuthCookie,
   signAuthToken,
+  signPasswordResetToken,
+  verifyPasswordResetToken,
   type AuthenticatedRequest,
 } from '../middleware/auth.ts';
 import { issueOtp, normalizePhone, verifyOtpCode } from '../services/otpService.ts';
@@ -19,6 +21,37 @@ import {
   resetPasswordSchema,
   verifyOtpSchema,
 } from '../validators/schemas.ts';
+
+function maskEmail(email: string): string {
+  const parts = email.split('@');
+  if (parts.length !== 2) return email;
+  const [local, domain] = parts;
+  if (local.length <= 2) {
+    return `${local[0] || '*'}*@${domain}`;
+  }
+  return `${local.slice(0, 2)}${'*'.repeat(Math.min(5, local.length - 2))}${local.slice(-1)}@${domain}`;
+}
+
+async function findUserByRecoveryIdentifier(rawIdentifier: string, verifiedOnly: boolean) {
+  const raw = rawIdentifier.trim();
+  const maybePhone = normalizePhone(raw);
+  const maybeLower = raw.toLowerCase();
+  const maybeUsername = maybeLower.replace(/^@/, '');
+
+  const orConditions: Record<string, unknown>[] = [
+    { email: maybeLower },
+    { username: maybeUsername },
+  ];
+  if (maybePhone.length >= 7) {
+    orConditions.push({ phone: maybePhone });
+  }
+
+  const filter: Record<string, unknown> = { $or: orConditions };
+  if (verifiedOnly) {
+    filter.isVerified = true;
+  }
+  return User.findOne(filter);
+}
 
 export async function checkUsername(req: Request, res: Response) {
   const raw = String(req.query.username || '').trim().toLowerCase();
@@ -116,32 +149,60 @@ export async function verifyOtp(req: Request, res: Response) {
     });
   }
 
+  const user = await User.findOne({ phone, isVerified: true });
+  if (!user) {
+    throw new AppError('Verified account not found for this phone number.', 404, 'USER_NOT_FOUND');
+  }
+
+  const resetToken = signPasswordResetToken({
+    _id: user._id as { toString(): string },
+    phone: user.phone,
+  });
+
   res.json({
     success: true,
-    message: 'Verification code confirmed.',
+    message: 'Verification code confirmed. You can now set a new password.',
+    data: {
+      phone: user.phone,
+      resetToken,
+    },
   });
 }
 
 export async function resendOtp(req: Request, res: Response) {
   const parsed = resendOtpSchema.parse(req.body);
-  const phone = normalizePhone(parsed.phone);
-
-  const user = await User.findOne({ phone });
+  const user = await findUserByRecoveryIdentifier(
+    parsed.phone,
+    parsed.purpose === 'reset_password'
+  );
   if (!user) {
-    throw new AppError('No account found for this phone number.', 404, 'USER_NOT_FOUND');
+    throw new AppError(
+      parsed.purpose === 'reset_password'
+        ? 'No verified account found for that phone number, email, or username.'
+        : 'No account found for this phone number or email.',
+      404,
+      'USER_NOT_FOUND'
+    );
   }
   if (parsed.purpose === 'register' && user.isVerified) {
     throw new AppError('This account is already verified. Please log in.', 400, 'ALREADY_VERIFIED');
   }
+  if (!user.email) {
+    throw new AppError(
+      'This account does not have a recovery email address configured.',
+      400,
+      'EMAIL_REQUIRED'
+    );
+  }
 
-  const otpInfo = await issueOtp(phone, parsed.purpose, user.email);
+  const otpInfo = await issueOtp(user.phone, parsed.purpose, user.email);
 
   res.json({
     success: true,
     message: 'Verification code resent.',
     data: {
-      phone,
-      email: user.email,
+      phone: user.phone,
+      email: maskEmail(user.email),
       cooldownSeconds: otpInfo.cooldownSeconds,
       expiresAt: otpInfo.expiresAt,
     },
@@ -194,25 +255,29 @@ export async function login(req: Request, res: Response) {
 
 export async function forgotPassword(req: Request, res: Response) {
   const parsed = forgotPasswordSchema.parse(req.body);
-  const raw = parsed.phone.trim();
-  const maybePhone = normalizePhone(raw);
-  const maybeEmail = raw.toLowerCase();
-
-  const user = await User.findOne({
-    isVerified: true,
-    $or: [{ phone: maybePhone }, { email: maybeEmail }],
-  });
+  const user = await findUserByRecoveryIdentifier(parsed.phone, true);
   if (!user) {
-    throw new AppError('No verified account found with that phone number or email.', 404, 'USER_NOT_FOUND');
+    throw new AppError(
+      'No verified account found with that phone number, email, or username.',
+      404,
+      'USER_NOT_FOUND'
+    );
+  }
+  if (!user.email) {
+    throw new AppError(
+      'This account does not have a recovery email address configured.',
+      400,
+      'EMAIL_REQUIRED'
+    );
   }
 
   const otpInfo = await issueOtp(user.phone, 'reset_password', user.email);
   res.json({
     success: true,
-    message: 'Password reset code sent.',
+    message: 'Password reset code sent to your registered email.',
     data: {
       phone: user.phone,
-      email: user.email,
+      email: maskEmail(user.email),
       cooldownSeconds: otpInfo.cooldownSeconds,
       expiresAt: otpInfo.expiresAt,
     },
@@ -223,11 +288,37 @@ export async function resetPassword(req: Request, res: Response) {
   const parsed = resetPasswordSchema.parse(req.body);
   const phone = normalizePhone(parsed.phone);
 
-  await verifyOtpCode(phone, parsed.code, 'reset_password');
+  let verifiedUserId: string | null = null;
+  if (parsed.resetToken) {
+    try {
+      const decoded = verifyPasswordResetToken(parsed.resetToken);
+      if (normalizePhone(decoded.phone) !== phone) {
+        throw new AppError(
+          'Password reset session does not match this account.',
+          400,
+          'RESET_TOKEN_INVALID'
+        );
+      }
+      verifiedUserId = decoded.sub;
+    } catch (err) {
+      if (err instanceof AppError) throw err;
+      throw new AppError(
+        'Password reset session has expired. Please request a new verification code.',
+        400,
+        'RESET_TOKEN_INVALID'
+      );
+    }
+  } else if (parsed.code) {
+    await verifyOtpCode(phone, parsed.code, 'reset_password');
+  }
 
   const passwordHash = await bcrypt.hash(parsed.newPassword, 12);
+  const filter = verifiedUserId
+    ? { _id: verifiedUserId, phone, isVerified: true }
+    : { phone, isVerified: true };
+
   const user = await User.findOneAndUpdate(
-    { phone, isVerified: true },
+    filter,
     { $set: { passwordHash } },
     { new: true }
   );

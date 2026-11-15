@@ -157,7 +157,7 @@ export const authApi = {
     const res = await api.post<{
       success: boolean;
       message: string;
-      data?: { user: User; token: string };
+      data?: { user?: User; token?: string; phone?: string; resetToken?: string };
     }>('/auth/verify-otp', payload);
     return res.data;
   },
@@ -168,7 +168,7 @@ export const authApi = {
     const res = await api.post<{
       success: boolean;
       message: string;
-      data: { cooldownSeconds: number };
+      data: { phone?: string; email?: string; cooldownSeconds: number };
     }>('/auth/resend-otp', payload);
     return res.data;
   },
@@ -189,7 +189,8 @@ export const authApi = {
   },
   resetPassword: async (payload: {
     phone: string;
-    code: string;
+    resetToken?: string;
+    code?: string;
     newPassword: string;
   }) => {
     const res = await api.post<{ success: boolean; message: string }>(

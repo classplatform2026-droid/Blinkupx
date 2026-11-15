@@ -1,8 +1,7 @@
 import React, { useState } from 'react';
 import { ArrowLeft, Eye, EyeOff } from 'lucide-react';
-import { Link, useNavigate, useSearchParams } from 'react-router-dom';
+import { Link, useLocation, useNavigate, useSearchParams } from 'react-router-dom';
 import { BrandMark } from '../../components/BrandMark';
-import { Modal } from '../../components/Modal';
 import { PrimaryButton } from '../../components/PrimaryButton';
 import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
@@ -10,24 +9,21 @@ import { authApi, extractApiError, setStoredAuthToken } from '../../services/api
 
 export function LoginPage() {
   const navigate = useNavigate();
+  const location = useLocation();
   const [searchParams] = useSearchParams();
   const rawRedirect = searchParams.get('redirect') || '';
   const safeRedirect = rawRedirect.startsWith('/') ? rawRedirect : '/chats';
+  const incomingIdentifier =
+    ((location.state as { identifier?: string } | null)?.identifier || '').trim();
   const { setAuthenticatedUser } = useAuth();
   const { showToast } = useToast();
 
-  const [identifier, setIdentifier] = useState('');
+  const [identifier, setIdentifier] = useState(incomingIdentifier);
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [unverifiedPhone, setUnverifiedPhone] = useState<string | null>(null);
-
-  // Forgot password modal state
-  const [forgotOpen, setForgotOpen] = useState(false);
-  const [resetPhone, setResetPhone] = useState('');
-  const [sendingReset, setSendingReset] = useState(false);
-  const [forgotError, setForgotError] = useState<string | null>(null);
 
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -59,37 +55,6 @@ export function LoginPage() {
       }
     } finally {
       setSubmitting(false);
-    }
-  };
-
-  const handleSendResetOtp = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setForgotError(null);
-    const trimmed = resetPhone.trim();
-    if (trimmed.length < 3) {
-      setForgotError('Enter your registered phone number or email.');
-      return;
-    }
-    setSendingReset(true);
-    try {
-      const res = await authApi.forgotPassword(trimmed);
-      if (!res?.success || !res?.data?.phone) {
-        throw new Error(res?.message || 'Unable to send reset code.');
-      }
-      setForgotOpen(false);
-      showToast('Password reset code sent to your email.', 'success');
-      navigate('/verify-otp', {
-        state: {
-          phone: res.data.phone,
-          email: res.data.email,
-          purpose: 'reset_password',
-          cooldownSeconds: res.data.cooldownSeconds,
-        },
-      });
-    } catch (err) {
-      setForgotError(extractApiError(err).message);
-    } finally {
-      setSendingReset(false);
     }
   };
 
@@ -158,7 +123,11 @@ export function LoginPage() {
               </label>
               <button
                 type="button"
-                onClick={() => setForgotOpen(true)}
+                onClick={() =>
+                  navigate('/forgot-password', {
+                    state: identifier.trim() ? { identifier: identifier.trim() } : undefined,
+                  })
+                }
                 className="text-xs text-[#999999] hover:text-[#FFFFFF] transition-colors cursor-pointer"
               >
                 Forgot password?
@@ -198,40 +167,6 @@ export function LoginPage() {
           </Link>
         </p>
       </div>
-
-      <Modal
-        open={forgotOpen}
-        onClose={() => setForgotOpen(false)}
-        title="Reset password"
-      >
-        <form onSubmit={handleSendResetOtp} className="space-y-4">
-          <p className="text-sm text-[#999999] leading-relaxed">
-            Enter the phone number or email address associated with your BlinkUpZ account. We will send a 6-digit verification code.
-          </p>
-          {forgotError && (
-            <p className="text-sm text-[#E5484D] bg-[#242424] border border-[#E5484D]/40 rounded-xl px-3.5 py-2.5">
-              {forgotError}
-            </p>
-          )}
-          <div>
-            <label htmlFor="resetPhone" className="block text-xs font-medium text-[#999999] mb-1.5">
-              Registered Phone Number or Email
-            </label>
-            <input
-              id="resetPhone"
-              type="text"
-              required
-              value={resetPhone}
-              onChange={(e) => setResetPhone(e.target.value)}
-              placeholder="01900000000 or you@example.com"
-              className="w-full h-11 rounded-xl bg-[#242424] border border-[#303030] px-3.5 text-sm font-mono text-[#FFFFFF] focus:border-[#FFFFFF]/50 focus:outline-none"
-            />
-          </div>
-          <PrimaryButton type="submit" fullWidth loading={sendingReset}>
-            Send Verification Code
-          </PrimaryButton>
-        </form>
-      </Modal>
     </div>
   );
 }

@@ -24,6 +24,38 @@ export function signAuthToken(user: { _id: { toString(): string }; username: str
   );
 }
 
+const PASSWORD_RESET_SECRET = `${env.jwtSecret}:password-reset`;
+
+export function signPasswordResetToken(user: {
+  _id: { toString(): string };
+  phone: string;
+}): string {
+  return jwt.sign(
+    { sub: user._id.toString(), phone: user.phone, purpose: 'password_reset' },
+    PASSWORD_RESET_SECRET,
+    { expiresIn: '10m' }
+  );
+}
+
+export function verifyPasswordResetToken(token: string): {
+  sub: string;
+  phone: string;
+} {
+  const decoded = jwt.verify(token, PASSWORD_RESET_SECRET) as {
+    sub?: string;
+    phone?: string;
+    purpose?: string;
+  };
+  if (!decoded?.sub || !decoded?.phone || decoded.purpose !== 'password_reset') {
+    throw new AppError(
+      'Password reset session is invalid or has expired. Please request a new code.',
+      400,
+      'RESET_TOKEN_INVALID'
+    );
+  }
+  return { sub: decoded.sub, phone: decoded.phone };
+}
+
 function isHttpsRequest(req: Request): boolean {
   const proto = req.headers['x-forwarded-proto'];
   if (typeof proto === 'string') {

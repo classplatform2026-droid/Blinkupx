@@ -35,19 +35,28 @@ export const verifyOtpSchema = z.object({
 });
 
 export const resendOtpSchema = z.object({
-  phone: z.string().trim().min(7, 'Phone number is required'),
+  phone: z.string().trim().min(2, 'Phone number, email, or username is required'),
   purpose: z.enum(['register', 'reset_password']).default('register'),
 });
 
 export const forgotPasswordSchema = z.object({
-  phone: z.string().trim().min(3, 'Enter your registered phone number or email'),
+  phone: z.string().trim().min(2, 'Enter your registered phone number, email, or username'),
 });
 
-export const resetPasswordSchema = z.object({
-  phone: z.string().trim().min(7),
-  code: z.string().trim().regex(/^\d{6}$/, 'Enter the 6-digit verification code'),
-  newPassword: z.string().min(8, 'Password must be at least 8 characters').max(128),
-});
+export const resetPasswordSchema = z
+  .object({
+    phone: z.string().trim().min(7, 'Phone number is required'),
+    resetToken: z.string().trim().min(10).optional(),
+    code: z
+      .string()
+      .trim()
+      .regex(/^\d{6}$/, 'Enter the 6-digit verification code')
+      .optional(),
+    newPassword: z.string().min(8, 'Password must be at least 8 characters').max(128),
+  })
+  .refine((data) => Boolean(data.resetToken || data.code), {
+    message: 'Verification code or reset token is required',
+  });
 
 export const privacyVisibilitySchema = z.enum(['everyone', 'contacts', 'nobody']);
 export const soundToneSchema = z.enum(['chime', 'ping', 'pop', 'soft']);

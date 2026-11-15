@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { ArrowLeft } from 'lucide-react';
+import { ArrowLeft, Eye, EyeOff } from 'lucide-react';
 import { Link, useLocation, useNavigate } from 'react-router-dom';
 import { BrandMark } from '../../components/BrandMark';
 import { PrimaryButton } from '../../components/PrimaryButton';
@@ -33,8 +33,10 @@ export function VerifyOtpPage() {
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
   // If purpose === 'reset_password' and OTP is verified, allow setting new password
-  const [verifiedResetCode, setVerifiedResetCode] = useState<string | null>(null);
+  const [resetToken, setResetToken] = useState<string | null>(null);
   const [newPassword, setNewPassword] = useState('');
+  const [confirmPassword, setConfirmPassword] = useState('');
+  const [showNewPassword, setShowNewPassword] = useState(false);
 
   const inputRefs = useRef<Array<HTMLInputElement | null>>([]);
 
@@ -103,14 +105,19 @@ export function VerifyOtpPage() {
 
     setVerifying(true);
     try {
+      const res = await authApi.verifyOtp({
+        phone: phone.trim(),
+        code,
+        purpose,
+      });
+
       if (purpose === 'reset_password') {
-        setVerifiedResetCode(code);
+        if (!res.data?.resetToken) {
+          throw new Error('Unable to start password reset session.');
+        }
+        setResetToken(res.data.resetToken);
+        showToast('Verification code confirmed.', 'success');
       } else {
-        const res = await authApi.verifyOtp({
-          phone: phone.trim(),
-          code,
-          purpose: 'register',
-        });
         if (res.data?.token) {
           setStoredAuthToken(res.data.token);
         }
@@ -136,20 +143,28 @@ export function VerifyOtpPage() {
       setErrorMsg('New password must be at least 8 characters.');
       return;
     }
+    if (newPassword !== confirmPassword) {
+      setErrorMsg('Passwords do not match.');
+      return;
+    }
     setVerifying(true);
     try {
       await authApi.resetPassword({
         phone: phone.trim(),
-        code: verifiedResetCode!,
+        resetToken: resetToken!,
         newPassword,
       });
       showToast('Password updated. Please log in.', 'success');
-      navigate('/login', { replace: true });
+      navigate('/login', { replace: true, state: { identifier: phone.trim() } });
     } catch (err) {
       const info = extractApiError(err);
       setErrorMsg(info.message);
-      if (info.code === 'OTP_INVALID' || info.code === 'OTP_EXPIRED_OR_MISSING') {
-        setVerifiedResetCode(null);
+      if (
+        info.code === 'RESET_TOKEN_INVALID' ||
+        info.code === 'OTP_INVALID' ||
+        info.code === 'OTP_EXPIRED_OR_MISSING'
+      ) {
+        setResetToken(null);
       }
     } finally {
       setVerifying(false);
@@ -189,10 +204,10 @@ export function VerifyOtpPage() {
           <BrandMark size={32} />
           <div>
             <h1 className="text-2xl font-bold tracking-tight">
-              {verifiedResetCode ? 'Set new password' : 'Verify your account'}
+              {resetToken ? 'Set new password' : 'Verify your account'}
             </h1>
             <p className="text-sm text-[#999999]">
-              {verifiedResetCode
+              {resetToken
                 ? 'Choose a strong password for your account'
                 : state.email || phone
                   ? `Enter the 6-digit code sent to ${state.email || phone}`
@@ -201,7 +216,7 @@ export function VerifyOtpPage() {
           </div>
         </div>
 
-        {verifiedResetCode ? (
+        {resetToken ? (
           <form
             onSubmit={handleResetPasswordSubmit}
             className="rounded-2xl bg-[#202020] border border-[#303030] p-6 space-y-4"
@@ -215,14 +230,39 @@ export function VerifyOtpPage() {
               <label htmlFor="newPass" className="block text-xs font-medium text-[#999999] mb-1.5">
                 New Password
               </label>
+              <div className="relative">
+                <input
+                  id="newPass"
+                  type={showNewPassword ? 'text' : 'password'}
+                  required
+                  minLength={8}
+                  value={newPassword}
+                  onChange={(e) => setNewPassword(e.target.value)}
+                  placeholder="At least 8 characters"
+                  className="w-full h-11 rounded-xl bg-[#242424] border border-[#303030] pl-3.5 pr-11 text-sm text-[#FFFFFF] focus:border-[#FFFFFF]/50 focus:outline-none"
+                />
+                <button
+                  type="button"
+                  onClick={() => setShowNewPassword((p) => !p)}
+                  aria-label={showNewPassword ? 'Hide password' : 'Show password'}
+                  className="absolute right-1.5 top-1/2 -translate-y-1/2 w-9 h-9 rounded-lg flex items-center justify-center text-[#999999] hover:text-white cursor-pointer"
+                >
+                  {showNewPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                </button>
+              </div>
+            </div>
+            <div>
+              <label htmlFor="confirmNewPass" className="block text-xs font-medium text-[#999999] mb-1.5">
+                Confirm New Password
+              </label>
               <input
-                id="newPass"
-                type="password"
+                id="confirmNewPass"
+                type={showNewPassword ? 'text' : 'password'}
                 required
                 minLength={8}
-                value={newPassword}
-                onChange={(e) => setNewPassword(e.target.value)}
-                placeholder="At least 8 characters"
+                value={confirmPassword}
+                onChange={(e) => setConfirmPassword(e.target.value)}
+                placeholder="Re-enter your new password"
                 className="w-full h-11 rounded-xl bg-[#242424] border border-[#303030] px-3.5 text-sm text-[#FFFFFF] focus:border-[#FFFFFF]/50 focus:outline-none"
               />
             </div>
