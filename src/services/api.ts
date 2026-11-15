@@ -381,10 +381,14 @@ export const messageApi = {
     const res = await api.post<{ success: boolean; data: Message }>('/messages', payload);
     return res.data.data;
   },
-  edit: async (id: string, content: string) => {
+  edit: async (
+    id: string,
+    content: string,
+    attachmentCaptions?: Array<{ index: number; caption: string }>
+  ) => {
     const res = await api.patch<{ success: boolean; data: Message }>(
       `/messages/${id}`,
-      { content }
+      { content, ...(attachmentCaptions ? { attachmentCaptions } : {}) }
     );
     return res.data.data;
   },

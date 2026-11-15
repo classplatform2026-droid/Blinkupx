@@ -60,6 +60,7 @@ export const ALLOWED_MIME_TYPES = new Set([
 ]);
 
 export const MAX_UPLOAD_BYTES = 25 * 1024 * 1024; // 25 MB
+export const MAX_MEDIA_FILES_PER_MESSAGE = 10;
 
 const MIME_TO_EXT: Record<string, string> = {
   'image/jpeg': 'jpg',

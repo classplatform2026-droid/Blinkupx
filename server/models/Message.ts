@@ -10,6 +10,7 @@ export interface IMessageAttachment {
   fileSize: number;
   mimeType: string;
   duration?: number;
+  caption?: string;
 }
 
 export interface IMessageReaction {
@@ -58,6 +59,7 @@ const attachmentSchema = new Schema<IMessageAttachment>(
     fileSize: { type: Number, default: 0 },
     mimeType: { type: String, default: '' },
     duration: { type: Number, default: 0 },
+    caption: { type: String, default: '', maxlength: 1000 },
   },
   { _id: false }
 );

@@ -109,18 +109,42 @@ export async function editMessage(req: AuthenticatedRequest, res: Response) {
   if (msg.deletedAt) {
     throw new AppError('Deleted messages cannot be edited.', 400, 'BAD_REQUEST');
   }
-  if (msg.messageType !== 'text') {
-    throw new AppError('Only text messages can be edited.', 400, 'BAD_REQUEST');
+  if (msg.messageType === 'system' || msg.messageType === 'voice') {
+    throw new AppError('This message type cannot be edited.', 400, 'BAD_REQUEST');
+  }
+  if (msg.messageType === 'text' && !parsed.content.trim()) {
+    throw new AppError('Message cannot be empty.', 400, 'VALIDATION_ERROR');
   }
 
-  msg.content = parsed.content;
-  msg.links = await extractAndFetchLinkPreviews(parsed.content);
+  msg.content = parsed.content.trim();
+  if (parsed.attachmentCaptions && msg.attachments.length > 0) {
+    for (const item of parsed.attachmentCaptions) {
+      if (msg.attachments[item.index]) {
+        msg.attachments[item.index].caption = item.caption.trim();
+      }
+    }
+  }
+  msg.links = msg.content ? await extractAndFetchLinkPreviews(msg.content) : [];
   msg.editedAt = new Date();
   await msg.save();
 
   const conv = await Conversation.findById(msg.conversationId);
   if (conv?.lastMessage?.messageId?.toString() === msg._id.toString()) {
-    conv.lastMessage.content = parsed.content.slice(0, 140);
+    const fallbackLabel =
+      msg.messageType === 'image'
+        ? msg.attachments.length > 1
+          ? `${msg.attachments.length} Photos`
+          : 'Photo'
+        : msg.messageType === 'video'
+          ? msg.attachments.length > 1
+            ? `${msg.attachments.length} Videos`
+            : 'Video'
+          : msg.messageType === 'document'
+            ? msg.attachments.length > 1
+              ? `${msg.attachments.length} Documents`
+              : 'Document'
+            : 'Message';
+    conv.lastMessage.content = (msg.content || fallbackLabel).slice(0, 140);
     await conv.save();
   }
 

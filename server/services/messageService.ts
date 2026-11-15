@@ -248,15 +248,24 @@ export async function createAndDispatchMessage(params: {
     throw err;
   }
 
+  const attCount = parsed.attachments.length;
+  const firstAttCaption = parsed.attachments.find((a) => a.caption?.trim())?.caption?.trim();
   const previewText =
     parsed.content.trim() ||
+    firstAttCaption ||
     (parsed.messageType === 'voice'
       ? 'Voice message'
       : parsed.messageType === 'image'
-        ? 'Photo'
+        ? attCount > 1
+          ? `${attCount} Photos`
+          : 'Photo'
         : parsed.messageType === 'video'
-          ? 'Video'
-          : 'Document');
+          ? attCount > 1
+            ? `${attCount} Videos`
+            : 'Video'
+          : attCount > 1
+            ? `${attCount} Documents`
+            : 'Document');
 
   conv.lastMessage = {
     messageId: msg._id as Types.ObjectId,

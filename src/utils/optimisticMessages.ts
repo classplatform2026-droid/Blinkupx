@@ -1,6 +1,7 @@
 import type { Socket } from 'socket.io-client';
 import { extractApiError, messageApi } from '../services/api';
 import type {
+  MediaUploadProgressItem,
   Message,
   MessageAttachment,
   MessageDeliveryStatus,
@@ -42,6 +43,7 @@ export function createOptimisticMessage(params: {
   content?: string;
   messageType: 'text' | 'image' | 'video' | 'document' | 'voice';
   attachments?: MessageAttachment[];
+  mediaProgress?: MediaUploadProgressItem[];
   replyTo?: Message | null;
   duration?: number;
 }): Message {
@@ -52,6 +54,7 @@ export function createOptimisticMessage(params: {
     content = '',
     messageType,
     attachments = [],
+    mediaProgress,
     replyTo,
     duration,
   } = params;
@@ -70,6 +73,7 @@ export function createOptimisticMessage(params: {
     content,
     messageType,
     attachments,
+    mediaProgress,
     links: [],
     replyTo: replyTo
       ? {
@@ -122,6 +126,7 @@ export function reconcileIncomingMessage(
       deliveryStatus: resolvedStatus,
       deliveredTo: mergeUniqueIds(existing.deliveredTo, incoming.deliveredTo),
       readBy: mergeUniqueIds(existing.readBy, incoming.readBy),
+      mediaProgress: undefined,
       localError: null,
       retryPayload: null,
     };
@@ -132,6 +137,26 @@ export function reconcileIncomingMessage(
   }
 
   return [...prev, incoming];
+}
+
+export function updateOptimisticMediaProgress(
+  prev: Message[],
+  clientMessageId: string,
+  clientItemId: string,
+  patch: Partial<MediaUploadProgressItem>
+): Message[] {
+  return prev.map((m) => {
+    if (m.clientMessageId !== clientMessageId && m.id !== clientMessageId) {
+      return m;
+    }
+    if (!m.mediaProgress) return m;
+    return {
+      ...m,
+      mediaProgress: m.mediaProgress.map((item) =>
+        item.clientItemId === clientItemId ? { ...item, ...patch } : item
+      ),
+    };
+  });
 }
 
 export function markOptimisticSending(

@@ -125,8 +125,10 @@ export const sendMessageSchema = z.object({
         fileSize: z.number().optional().default(0),
         mimeType: z.string().optional().default(''),
         duration: z.number().optional().default(0),
+        caption: z.string().trim().max(1000).optional().default(''),
       })
     )
+    .max(10, 'Maximum 10 media attachments per message')
     .optional()
     .default([]),
   replyTo: z.string().nullable().optional(),
@@ -140,7 +142,15 @@ export const sendMessageSchema = z.object({
 });
 
 export const editMessageSchema = z.object({
-  content: z.string().trim().min(1, 'Message cannot be empty').max(5000),
+  content: z.string().trim().max(5000),
+  attachmentCaptions: z
+    .array(
+      z.object({
+        index: z.number().int().min(0).max(9),
+        caption: z.string().trim().max(1000),
+      })
+    )
+    .optional(),
 });
 
 export const reactionSchema = z.object({

@@ -591,7 +591,7 @@ export async function getSharedMedia(req: AuthenticatedRequest, res: Response) {
           fileName: att.fileName || (isVideo ? 'video' : 'photo'),
           fileSize: att.fileSize || 0,
           mimeType: att.mimeType || '',
-          caption: m.content || '',
+          caption: att.caption || m.content || '',
           sender,
           createdAt: m.createdAt,
         });
@@ -606,7 +606,7 @@ export async function getSharedMedia(req: AuthenticatedRequest, res: Response) {
           fileExtension: getFileExtension(att.fileName || '', att.mimeType || ''),
           fileSize: att.fileSize || 0,
           mimeType: att.mimeType || '',
-          caption: m.content || '',
+          caption: att.caption || m.content || '',
           sender,
           createdAt: m.createdAt,
         });

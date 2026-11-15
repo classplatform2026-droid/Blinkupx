@@ -116,6 +116,7 @@ export interface MessageAttachment {
   fileSize: number;
   mimeType: string;
   duration?: number;
+  caption?: string;
 }
 
 export interface MessageReaction {
@@ -133,6 +134,20 @@ export interface MessageLinkPreview {
 }
 
 export type MessageDeliveryStatus = 'sending' | 'sent' | 'delivered' | 'read' | 'failed';
+
+export type MediaUploadStage =
+  | 'preparing'
+  | 'uploading'
+  | 'processing'
+  | 'sent'
+  | 'failed';
+
+export interface MediaUploadProgressItem {
+  clientItemId: string;
+  stage: MediaUploadStage;
+  progress: number;
+  error?: string | null;
+}
 
 export interface Message {
   id: string;
@@ -165,6 +180,7 @@ export interface Message {
   deliveredTo: string[];
   readBy: string[];
   deliveryStatus: MessageDeliveryStatus;
+  mediaProgress?: MediaUploadProgressItem[];
   localError?: string | null;
   retryPayload?: {
     content?: string;

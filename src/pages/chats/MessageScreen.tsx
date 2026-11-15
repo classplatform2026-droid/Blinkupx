@@ -16,6 +16,7 @@ import {
 } from 'lucide-react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { DropdownMenu } from '../../components/DropdownMenu';
+import { MediaGalleryModal } from '../../components/MediaGalleryModal';
 import { MessageBubble } from '../../components/MessageBubble';
 import { MessageInput, type OutgoingMessagePayload } from '../../components/MessageInput';
 import { Modal } from '../../components/Modal';
@@ -26,25 +27,16 @@ import { UserAvatar } from '../../components/UserAvatar';
 import { useAuth } from '../../context/AuthContext';
 import { useSocket } from '../../context/SocketContext';
 import { useToast } from '../../context/ToastContext';
+import { useOptimisticChatSender } from '../../hooks/useOptimisticChatSender';
 import {
   conversationApi,
   extractApiError,
-  mediaApi,
   messageApi,
   userApi,
 } from '../../services/api';
-import type { Conversation, Message, MessageAttachment, MessageLinkPreview } from '../../types';
+import type { Conversation, Message, MessageLinkPreview } from '../../types';
 import { formatDateSeparator, formatLastSeen } from '../../utils/formatters';
-import {
-  createOptimisticMessage,
-  dispatchMessageToServer,
-  formatSendErrorMessage,
-  generateClientMessageId,
-  markOptimisticFailed,
-  markOptimisticSending,
-  reconcileIncomingMessage,
-  removeOptimisticMessage,
-} from '../../utils/optimisticMessages';
+import { reconcileIncomingMessage } from '../../utils/optimisticMessages';
 
 export function MessageScreen({ conversationId }: { conversationId: string }) {
   const navigate = useNavigate();
@@ -66,7 +58,10 @@ export function MessageScreen({ conversationId }: { conversationId: string }) {
   const [editingMessage, setEditingMessage] = useState<Message | null>(null);
   const [forwardingMessage, setForwardingMessage] = useState<Message | null>(null);
   const [forwardTargets, setForwardTargets] = useState<Conversation[]>([]);
-  const [previewImage, setPreviewImage] = useState<string | null>(null);
+  const [galleryPreview, setGalleryPreview] = useState<{
+    message: Message;
+    index: number;
+  } | null>(null);
   const [callUnavailableModal, setCallUnavailableModal] = useState<'voice' | 'video' | null>(null);
   const [blockModalOpen, setBlockModalOpen] = useState(false);
   const [blockBusy, setBlockBusy] = useState(false);
@@ -80,31 +75,22 @@ export function MessageScreen({ conversationId }: { conversationId: string }) {
 
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
-  const localMediaFilesRef = useRef<
-    Record<string, { file: Blob | File; duration?: number; blobUrl?: string }>
-  >({});
-  const uploadedAttachmentsRef = useRef<Record<string, MessageAttachment[]>>({});
-  const inFlightSendRef = useRef<Set<string>>(new Set());
 
-  const cleanupLocalResources = useCallback((clientMessageId?: string | null) => {
-    if (!clientMessageId) return;
-    const entry = localMediaFilesRef.current[clientMessageId];
-    if (entry?.blobUrl) {
-      URL.revokeObjectURL(entry.blobUrl);
-    }
-    delete localMediaFilesRef.current[clientMessageId];
-    delete uploadedAttachmentsRef.current[clientMessageId];
-  }, []);
-
-  useEffect(() => {
-    return () => {
-      Object.values(localMediaFilesRef.current).forEach((entry) => {
-        if (entry.blobUrl) URL.revokeObjectURL(entry.blobUrl);
-      });
-      localMediaFilesRef.current = {};
-      uploadedAttachmentsRef.current = {};
-    };
-  }, []);
+  const {
+    sendOutgoingMessage,
+    retryFailedMessage,
+    dismissFailedMessage,
+    scheduleCleanupLocalResources,
+  } = useOptimisticChatSender({
+    conversationId,
+    user,
+    socket,
+    hasNewerMessages,
+    setHasNewerMessages,
+    setMessages,
+    setHasMore,
+    onScrollToBottom: () => bottomRef.current?.scrollIntoView({ behavior: 'smooth' }),
+  });
 
   const emitReadIfVisible = useCallback(() => {
     if (!socket) return;
@@ -198,7 +184,7 @@ export function MessageScreen({ conversationId }: { conversationId: string }) {
 
     const onNewMessage = (msg: Message) => {
       if (msg.conversationId !== conversationId) return;
-      cleanupLocalResources(msg.clientMessageId);
+      scheduleCleanupLocalResources(msg.clientMessageId, false);
       if (!hasNewerMessages) {
         setMessages((prev) => reconcileIncomingMessage(prev, msg));
         setTimeout(() => {
@@ -337,7 +323,7 @@ export function MessageScreen({ conversationId }: { conversationId: string }) {
       socket.off('reaction:remove', onReaction);
       socket.off('conversation:updated', onConvUpdated);
     };
-  }, [socket, conversationId, user?.id, hasNewerMessages, cleanupLocalResources, emitReadIfVisible]);
+  }, [socket, conversationId, user?.id, hasNewerMessages, scheduleCleanupLocalResources, emitReadIfVisible]);
 
   const loadOlder = async () => {
     if (!hasMore || loadingOlder || messages.length === 0) return;
@@ -361,163 +347,18 @@ export function MessageScreen({ conversationId }: { conversationId: string }) {
     }
   };
 
-  const performSendAttempt = async (params: {
-    clientMessageId: string;
-    content?: string;
-    messageType: 'text' | 'image' | 'video' | 'document' | 'voice';
-    attachments?: MessageAttachment[];
-    replyTo?: string | null;
-  }) => {
-    const { clientMessageId, content, messageType, replyTo } = params;
-    if (inFlightSendRef.current.has(clientMessageId)) return;
-    inFlightSendRef.current.add(clientMessageId);
-
-    try {
-      let resolvedAttachments =
-        uploadedAttachmentsRef.current[clientMessageId] || params.attachments || [];
-
-      const localEntry = localMediaFilesRef.current[clientMessageId];
-      if (localEntry && !uploadedAttachmentsRef.current[clientMessageId]) {
-        const folder = messageType === 'voice' ? 'voice' : 'messages';
-        const fileNameOverride =
-          messageType === 'voice' ? `voice-${Date.now()}.webm` : undefined;
-        const uploaded = await mediaApi.upload(
-          localEntry.file,
-          folder,
-          undefined,
-          fileNameOverride
-        );
-        if (localEntry.duration) {
-          uploaded.duration = localEntry.duration;
-        }
-        resolvedAttachments = [uploaded];
-        uploadedAttachmentsRef.current[clientMessageId] = resolvedAttachments;
-      }
-
-      const created = await dispatchMessageToServer({
-        socket,
-        payload: {
-          conversationId,
-          clientMessageId,
-          content,
-          messageType,
-          attachments: resolvedAttachments,
-          replyTo,
-        },
-      });
-
-      cleanupLocalResources(clientMessageId);
-
-      if (hasNewerMessages) {
-        const latest = await messageApi.list(conversationId);
-        setMessages(latest.messages);
-        setHasMore(latest.hasMore);
-        setHasNewerMessages(false);
-      } else {
-        setMessages((prev) => reconcileIncomingMessage(prev, created));
-      }
-
-      window.dispatchEvent(
-        new CustomEvent('blinkupz:shared-media-refresh', { detail: { conversationId } })
-      );
-    } catch (err) {
-      const errorMsg = formatSendErrorMessage(err);
-      setMessages((prev) => markOptimisticFailed(prev, clientMessageId, errorMsg));
-    } finally {
-      inFlightSendRef.current.delete(clientMessageId);
-    }
-  };
-
   const handleSendMessage = (payload: OutgoingMessagePayload) => {
-    if (!user) return;
-    const clientMessageId = generateClientMessageId();
     const replySnapshot = replyingTo;
     setReplyingTo(null);
-
-    let initialAttachments: MessageAttachment[] = payload.attachments || [];
-    if (payload.localFile) {
-      const blobUrl = URL.createObjectURL(payload.localFile);
-      const fileObj = payload.localFile;
-      const fileName =
-        'name' in fileObj && typeof fileObj.name === 'string'
-          ? fileObj.name
-          : payload.messageType === 'voice'
-            ? 'Voice message'
-            : 'attachment';
-
-      localMediaFilesRef.current[clientMessageId] = {
-        file: fileObj,
-        duration: payload.duration,
-        blobUrl,
-      };
-      initialAttachments = [
-        {
-          url: blobUrl,
-          publicId: '',
-          fileName,
-          fileSize: fileObj.size || 0,
-          mimeType: fileObj.type || '',
-          duration: payload.duration,
-        },
-      ];
-    }
-
-    const optimistic = createOptimisticMessage({
-      clientMessageId,
-      conversationId,
-      sender: user,
-      content: payload.content || '',
-      messageType: payload.messageType,
-      attachments: initialAttachments,
-      replyTo: replySnapshot,
-      duration: payload.duration,
-    });
-
-    if (hasNewerMessages) {
-      setMessages([optimistic]);
-      setHasNewerMessages(false);
-    } else {
-      setMessages((prev) => [...prev, optimistic]);
-    }
-
-    requestAnimationFrame(() => {
-      bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
-    });
-
-    void performSendAttempt({
-      clientMessageId,
-      content: payload.content,
-      messageType: payload.messageType,
-      attachments: payload.localFile ? undefined : payload.attachments,
-      replyTo: replySnapshot?.id || null,
-    });
+    sendOutgoingMessage(payload, replySnapshot);
   };
 
-  const handleRetryMessage = (msg: Message) => {
-    const cid = msg.clientMessageId || msg.id;
-    if (!cid || inFlightSendRef.current.has(cid)) return;
-    setMessages((prev) => markOptimisticSending(prev, cid));
-    void performSendAttempt({
-      clientMessageId: cid,
-      content: msg.retryPayload?.content ?? msg.content,
-      messageType:
-        msg.retryPayload?.messageType ??
-        (msg.messageType === 'system' ? 'text' : msg.messageType),
-      attachments: localMediaFilesRef.current[cid]
-        ? undefined
-        : msg.retryPayload?.attachments ?? msg.attachments,
-      replyTo: msg.retryPayload?.replyTo ?? msg.replyTo?.id ?? null,
-    });
-  };
-
-  const handleDismissFailed = (msg: Message) => {
-    const cid = msg.clientMessageId || msg.id;
-    cleanupLocalResources(cid);
-    setMessages((prev) => removeOptimisticMessage(prev, msg.id));
-  };
-
-  const handleSaveEdit = async (messageId: string, content: string) => {
-    const updated = await messageApi.edit(messageId, content);
+  const handleSaveEdit = async (
+    messageId: string,
+    content: string,
+    attachmentCaptions?: Array<{ index: number; caption: string }>
+  ) => {
+    const updated = await messageApi.edit(messageId, content, attachmentCaptions);
     setEditingMessage(null);
     setMessages((prev) => prev.map((m) => (m.id === updated.id ? updated : m)));
     window.dispatchEvent(
@@ -1027,9 +868,9 @@ export function MessageScreen({ conversationId }: { conversationId: string }) {
                     navigator.clipboard?.writeText(text);
                     showToast('Copied to clipboard.', 'info');
                   }}
-                  onPreviewImage={(url) => setPreviewImage(url)}
-                  onRetry={handleRetryMessage}
-                  onDismissFailed={handleDismissFailed}
+                  onPreviewMedia={(m, idx) => setGalleryPreview({ message: m, index: idx })}
+                  onRetry={retryFailedMessage}
+                  onDismissFailed={dismissFailedMessage}
                 />
               </React.Fragment>
             );
@@ -1122,22 +963,11 @@ export function MessageScreen({ conversationId }: { conversationId: string }) {
         )}
       </Modal>
 
-      {/* Image Preview Modal */}
-      <Modal
-        open={previewImage !== null}
-        onClose={() => setPreviewImage(null)}
-        title="Image Preview"
-        maxWidth="max-w-3xl"
-      >
-        {previewImage && (
-          <img
-            src={previewImage}
-            alt="Full preview"
-            referrerPolicy="no-referrer"
-            className="w-full max-h-[72vh] object-contain rounded-xl bg-black"
-          />
-        )}
-      </Modal>
+      <MediaGalleryModal
+        message={galleryPreview?.message || null}
+        initialIndex={galleryPreview?.index || 0}
+        onClose={() => setGalleryPreview(null)}
+      />
 
       {/* V1.0 Calling Info Modal */}
       <Modal

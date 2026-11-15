@@ -8,7 +8,9 @@ import {
   Download,
   Edit3,
   FileText,
+  Film,
   Forward,
+  Loader2,
   MoreHorizontal,
   Pin,
   Reply,
@@ -17,7 +19,7 @@ import {
   Trash2,
 } from 'lucide-react';
 import { useToast } from '../context/ToastContext';
-import type { Message } from '../types';
+import type { MediaUploadProgressItem, Message, MessageAttachment } from '../types';
 import { extractApiError, mediaApi } from '../services/api';
 import { formatDuration, formatFileSize, formatTime } from '../utils/formatters';
 import { EmojiPicker } from './EmojiPicker';
@@ -53,6 +55,68 @@ function renderMessageText(text: string, isOwn: boolean) {
   });
 }
 
+function UploadProgressOverlay({
+  progressItem,
+  onRetry,
+}: {
+  progressItem?: MediaUploadProgressItem;
+  onRetry?: () => void;
+}) {
+  if (!progressItem || progressItem.stage === 'sent') return null;
+
+  const isFailed = progressItem.stage === 'failed';
+  const label =
+    progressItem.stage === 'preparing'
+      ? 'Preparing...'
+      : progressItem.stage === 'uploading'
+        ? `Uploading · ${progressItem.progress}%`
+        : progressItem.stage === 'processing'
+          ? 'Processing...'
+          : 'Failed';
+
+  return (
+    <div
+      onClick={(e) => e.stopPropagation()}
+      className="absolute inset-0 bg-black/65 backdrop-blur-[1px] flex flex-col items-center justify-center gap-2 p-2 text-center"
+    >
+      <div className="flex items-center gap-1.5 text-[11px] font-medium text-[#FFFFFF]">
+        {isFailed ? (
+          <AlertCircle className="w-3.5 h-3.5 text-[#E5484D] shrink-0" />
+        ) : (
+          <Loader2 className="w-3.5 h-3.5 animate-spin shrink-0" />
+        )}
+        <span className="font-mono tabular-nums">{label}</span>
+      </div>
+
+      {!isFailed && (
+        <div className="w-4/5 max-w-[140px] h-1.5 rounded-full bg-white/20 overflow-hidden">
+          <div
+            className="h-full bg-white transition-all duration-150"
+            style={{
+              width: `${
+                progressItem.stage === 'preparing'
+                  ? 8
+                  : Math.max(8, progressItem.progress)
+              }%`,
+            }}
+          />
+        </div>
+      )}
+
+      {isFailed && onRetry && (
+        <button
+          type="button"
+          onClick={onRetry}
+          className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-[#FFFFFF] text-[#181818] text-[11px] font-medium hover:bg-[#E8E8E8] cursor-pointer"
+        >
+          <RotateCcw className="w-3 h-3" />
+          <span>Retry</span>
+        </button>
+      )}
+    </div>
+  );
+}
+
 interface MessageBubbleProps {
   message: Message;
   isOwn: boolean;
@@ -68,7 +132,8 @@ interface MessageBubbleProps {
   onReact: (message: Message, emoji: string) => void;
   onPin?: (message: Message) => void;
   onCopy: (text: string) => void;
-  onPreviewImage: (url: string) => void;
+  onPreviewMedia?: (message: Message, attachmentIndex: number) => void;
+  onPreviewImage?: (url: string) => void;
   onRetry?: (message: Message) => void;
   onDismissFailed?: (message: Message) => void;
 }
@@ -88,6 +153,7 @@ export function MessageBubble({
   onReact,
   onPin,
   onCopy,
+  onPreviewMedia,
   onPreviewImage,
   onRetry,
   onDismissFailed,
@@ -167,6 +233,125 @@ export function MessageBubble({
     senderRole && senderRole !== 'member'
       ? senderRole.charAt(0).toUpperCase() + senderRole.slice(1)
       : null;
+
+  // Classify attachments into visual media (images & videos) vs audio/documents while preserving original index
+  const indexedAttachments = (message.attachments || []).map((att, index) => ({
+    att,
+    index,
+  }));
+
+  const isVisualAttachment = (att: MessageAttachment) => {
+    const mime = (att.mimeType || '').toLowerCase();
+    if (mime.startsWith('image/') || mime.startsWith('video/')) return true;
+    if (mime.startsWith('audio/')) return false;
+    return (
+      (message.messageType === 'image' || message.messageType === 'video') &&
+      !/\.(pdf|docx?|xlsx?|pptx?|txt|csv|md|json|rtf|zip)$/i.test(att.fileName || '')
+    );
+  };
+
+  const visualMedia = !isDeleted
+    ? indexedAttachments.filter(({ att }) => isVisualAttachment(att))
+    : [];
+  const nonVisualAttachments = !isDeleted
+    ? indexedAttachments.filter(({ att }) => !isVisualAttachment(att))
+    : [];
+
+  const canEditMessageOrCaption =
+    isOwn &&
+    ['text', 'image', 'video', 'document'].includes(message.messageType);
+
+  const triggerMediaPreview = (originalIndex: number, resolvedUrl: string) => {
+    if (onPreviewMedia) {
+      onPreviewMedia(message, originalIndex);
+    } else if (onPreviewImage) {
+      onPreviewImage(resolvedUrl);
+    }
+  };
+
+  const renderVisualTile = (
+    att: MessageAttachment,
+    originalIndex: number,
+    extraClass = '',
+    overflowRemaining = 0
+  ) => {
+    const resolvedUrl =
+      fallbackUrls[originalIndex] && fallbackUrls[originalIndex].length > 0
+        ? fallbackUrls[originalIndex]
+        : att.url;
+    const isVideo =
+      att.mimeType.startsWith('video/') ||
+      (message.messageType === 'video' && !att.mimeType.startsWith('image/'));
+    const progressItem = message.mediaProgress?.[originalIndex];
+
+    return (
+      <div
+        key={`${att.url}-${originalIndex}`}
+        className={`relative overflow-hidden rounded-xl bg-black ${extraClass}`}
+      >
+        {fallbackUrls[originalIndex] === '' ? (
+          <div className="w-full h-full min-h-[110px] px-3 py-4 bg-[#181818]/40 text-xs text-[#999999] flex flex-col items-center justify-center gap-1">
+            {isVideo ? <Film className="w-5 h-5" /> : null}
+            <span>Media unavailable</span>
+          </div>
+        ) : isVideo ? (
+          <div className="relative w-full h-full">
+            <video
+              src={resolvedUrl}
+              controls={visualMedia.length === 1 && !progressItem}
+              muted={visualMedia.length > 1}
+              preload="metadata"
+              onClick={
+                visualMedia.length > 1
+                  ? () => triggerMediaPreview(originalIndex, resolvedUrl)
+                  : undefined
+              }
+              onError={() => tryAuthenticatedMediaFallback(originalIndex)}
+              className={`w-full object-cover ${
+                visualMedia.length === 1 ? 'max-h-72' : 'h-full cursor-pointer'
+              }`}
+            />
+            {visualMedia.length > 1 && (
+              <span className="absolute top-1.5 left-1.5 px-1.5 py-0.5 rounded bg-black/70 text-[10px] text-[#FFFFFF] inline-flex items-center gap-1 pointer-events-none">
+                <Film className="w-2.5 h-2.5" />
+              </span>
+            )}
+          </div>
+        ) : (
+          <button
+            type="button"
+            onClick={() => triggerMediaPreview(originalIndex, resolvedUrl)}
+            className="block w-full h-full cursor-pointer"
+          >
+            <img
+              src={resolvedUrl}
+              alt={att.fileName || 'Shared image'}
+              referrerPolicy="no-referrer"
+              onError={() => tryAuthenticatedMediaFallback(originalIndex)}
+              className={`w-full object-cover ${
+                visualMedia.length === 1 ? 'max-h-72' : 'h-full'
+              }`}
+            />
+          </button>
+        )}
+
+        {overflowRemaining > 0 && (
+          <button
+            type="button"
+            onClick={() => triggerMediaPreview(originalIndex, resolvedUrl)}
+            className="absolute inset-0 bg-black/65 flex items-center justify-center text-lg font-semibold text-[#FFFFFF] font-mono tabular-nums cursor-pointer"
+          >
+            +{overflowRemaining}
+          </button>
+        )}
+
+        <UploadProgressOverlay
+          progressItem={progressItem}
+          onRetry={onRetry ? () => onRetry(message) : undefined}
+        />
+      </div>
+    );
+  };
 
   return (
     <div
@@ -260,7 +445,7 @@ export function MessageBubble({
                   ? isFailed
                     ? 'bg-[#FFFFFF] text-[#181818] ring-1 ring-[#E5484D]'
                     : isSending
-                      ? 'bg-[#FFFFFF]/90 text-[#181818]'
+                      ? 'bg-[#FFFFFF]/95 text-[#181818]'
                       : 'bg-[#FFFFFF] text-[#181818]'
                   : 'bg-[#242424] text-[#FFFFFF] border border-[#303030]'
             }`}
@@ -291,84 +476,133 @@ export function MessageBubble({
               </div>
             )}
 
-            {!isDeleted &&
-              message.attachments.map((att, idx) => {
-                const resolvedUrl =
-                  fallbackUrls[idx] && fallbackUrls[idx].length > 0
-                    ? fallbackUrls[idx]
-                    : att.url;
+            {/* Visual Media Grid (1 item full, 2 items 2-col, 3 items 1+2, 4+ items 2x2 with +N) */}
+            {visualMedia.length === 1 && (
+              <div className="mb-1.5 space-y-1">
+                {renderVisualTile(visualMedia[0].att, visualMedia[0].index)}
+                {visualMedia[0].att.caption && (
+                  <p className="text-xs whitespace-pre-wrap opacity-90">
+                    {visualMedia[0].att.caption}
+                  </p>
+                )}
+              </div>
+            )}
 
-                if (message.messageType === 'image' || att.mimeType.startsWith('image/')) {
-                  return (
-                    <button
-                      key={`${att.url}-${idx}`}
-                      type="button"
-                      onClick={() => onPreviewImage(resolvedUrl)}
-                      className="block mb-1.5 overflow-hidden rounded-xl cursor-pointer"
-                    >
-                      {fallbackUrls[idx] === '' ? (
-                        <div className="px-3 py-4 rounded-xl bg-[#181818]/20 text-xs opacity-75">
-                          Image unavailable
-                        </div>
-                      ) : (
-                        <img
-                          src={resolvedUrl}
-                          alt={att.fileName || 'Shared image'}
-                          referrerPolicy="no-referrer"
-                          onError={() => tryAuthenticatedMediaFallback(idx)}
-                          className="max-h-72 w-auto object-cover rounded-xl"
-                        />
-                      )}
-                    </button>
-                  );
-                }
+            {visualMedia.length === 2 && (
+              <div className="grid grid-cols-2 gap-1 mb-1.5 min-w-[210px] sm:min-w-[260px]">
+                {visualMedia.map(({ att, index }) =>
+                  renderVisualTile(att, index, 'aspect-square')
+                )}
+              </div>
+            )}
 
-                if (message.messageType === 'video' || att.mimeType.startsWith('video/')) {
-                  return (
-                    <video
-                      key={`${att.url}-${idx}`}
+            {visualMedia.length === 3 && (
+              <div className="grid grid-cols-2 gap-1 mb-1.5 min-w-[210px] sm:min-w-[260px]">
+                {renderVisualTile(
+                  visualMedia[0].att,
+                  visualMedia[0].index,
+                  'col-span-2 aspect-[16/10]'
+                )}
+                {visualMedia.slice(1).map(({ att, index }) =>
+                  renderVisualTile(att, index, 'aspect-square')
+                )}
+              </div>
+            )}
+
+            {visualMedia.length >= 4 && (
+              <div className="grid grid-cols-2 gap-1 mb-1.5 min-w-[210px] sm:min-w-[260px]">
+                {visualMedia.slice(0, 4).map(({ att, index }, tileIdx) =>
+                  renderVisualTile(
+                    att,
+                    index,
+                    'aspect-square',
+                    tileIdx === 3 && visualMedia.length > 4
+                      ? visualMedia.length - 4
+                      : 0
+                  )
+                )}
+              </div>
+            )}
+
+            {/* Show individual captions summary under multi-media grid if any item has an individual caption */}
+            {visualMedia.length > 1 &&
+              visualMedia.some(({ att }) => Boolean(att.caption?.trim())) && (
+                <div
+                  className={`mb-1.5 space-y-0.5 text-xs ${
+                    isOwn ? 'text-[#333333]' : 'text-[#CCCCCC]'
+                  }`}
+                >
+                  {visualMedia.map(({ att }, pos) =>
+                    att.caption?.trim() ? (
+                      <p key={pos} className="truncate">
+                        <span className="font-mono text-[10px] opacity-70 mr-1.5">
+                          #{pos + 1}
+                        </span>
+                        {att.caption}
+                      </p>
+                    ) : null
+                  )}
+                </div>
+              )}
+
+            {/* Voice notes and Documents */}
+            {nonVisualAttachments.map(({ att, index }) => {
+              const resolvedUrl =
+                fallbackUrls[index] && fallbackUrls[index].length > 0
+                  ? fallbackUrls[index]
+                  : att.url;
+              const progressItem = message.mediaProgress?.[index];
+
+              if (message.messageType === 'voice' || att.mimeType.startsWith('audio/')) {
+                return (
+                  <div
+                    key={`${att.url}-${index}`}
+                    className="flex flex-col gap-1 min-w-[210px] py-1"
+                  >
+                    <audio
                       src={resolvedUrl}
                       controls
-                      preload="metadata"
-                      onError={() => tryAuthenticatedMediaFallback(idx)}
-                      className="max-h-72 w-full rounded-xl mb-1.5 bg-black"
+                      onError={() => tryAuthenticatedMediaFallback(index)}
+                      className="w-full h-9"
                     />
-                  );
-                }
+                    {progressItem && progressItem.stage !== 'sent' ? (
+                      <span
+                        className={`text-[11px] font-mono tabular-nums ${
+                          isOwn ? 'text-[#555555]' : 'text-[#999999]'
+                        }`}
+                      >
+                        {progressItem.stage === 'uploading'
+                          ? `Uploading · ${progressItem.progress}%`
+                          : progressItem.stage === 'processing'
+                            ? 'Processing...'
+                            : progressItem.stage === 'failed'
+                              ? 'Upload failed'
+                              : 'Preparing...'}
+                      </span>
+                    ) : att.duration ? (
+                      <span
+                        className={`text-[11px] font-mono tabular-nums ${
+                          isOwn ? 'text-[#555555]' : 'text-[#999999]'
+                        }`}
+                      >
+                        Voice · {formatDuration(att.duration)}
+                      </span>
+                    ) : null}
+                  </div>
+                );
+              }
 
-                if (message.messageType === 'voice' || att.mimeType.startsWith('audio/')) {
-                  return (
-                    <div key={`${att.url}-${idx}`} className="flex flex-col gap-1 min-w-[210px] py-1">
-                      <audio
-                        src={resolvedUrl}
-                        controls
-                        onError={() => tryAuthenticatedMediaFallback(idx)}
-                        className="w-full h-9"
-                      />
-                      {att.duration ? (
-                        <span
-                          className={`text-[11px] font-mono tabular-nums ${
-                            isOwn ? 'text-[#555555]' : 'text-[#999999]'
-                          }`}
-                        >
-                          Voice · {formatDuration(att.duration)}
-                        </span>
-                      ) : null}
-                    </div>
-                  );
-                }
-
-                return (
+              return (
+                <div key={`${att.url}-${index}`} className="mb-1.5">
                   <button
-                    key={`${att.url}-${idx}`}
                     type="button"
                     onClick={() => {
                       if (isPendingOrFailed || att.url.startsWith('blob:')) return;
                       mediaApi
-                        .downloadAttachment(message.id, idx, att.fileName || 'attachment')
+                        .downloadAttachment(message.id, index, att.fileName || 'attachment')
                         .catch((err) => showToast(extractApiError(err).message, 'error'));
                     }}
-                    className={`w-full text-left flex items-center gap-3 p-2.5 rounded-xl mb-1.5 cursor-pointer transition-colors ${
+                    className={`w-full text-left flex items-center gap-3 p-2.5 rounded-xl cursor-pointer transition-colors ${
                       isOwn
                         ? 'bg-[#181818]/10 text-[#181818] hover:bg-[#181818]/15'
                         : 'bg-[#181818] text-[#FFFFFF] border border-[#303030] hover:bg-[#202020]'
@@ -378,13 +612,33 @@ export function MessageBubble({
                     <div className="min-w-0 flex-1">
                       <p className="text-xs font-medium truncate">{att.fileName}</p>
                       <p className="text-[11px] opacity-70 font-mono tabular-nums">
-                        {formatFileSize(att.fileSize)}
+                        {progressItem && progressItem.stage !== 'sent'
+                          ? progressItem.stage === 'uploading'
+                            ? `Uploading · ${progressItem.progress}%`
+                            : progressItem.stage === 'processing'
+                              ? 'Processing...'
+                              : progressItem.stage === 'failed'
+                                ? 'Failed'
+                                : 'Preparing...'
+                          : formatFileSize(att.fileSize)}
                       </p>
                     </div>
-                    <Download className="w-4 h-4 shrink-0" />
+                    {progressItem &&
+                    progressItem.stage !== 'sent' &&
+                    progressItem.stage !== 'failed' ? (
+                      <Loader2 className="w-4 h-4 animate-spin shrink-0" />
+                    ) : (
+                      <Download className="w-4 h-4 shrink-0" />
+                    )}
                   </button>
-                );
-              })}
+                  {att.caption && (
+                    <p className="text-xs mt-1 whitespace-pre-wrap opacity-90">
+                      {att.caption}
+                    </p>
+                  )}
+                </div>
+              );
+            })}
 
             {message.content && (
               <p className="whitespace-pre-wrap">
@@ -580,7 +834,7 @@ export function MessageBubble({
                     <SmilePlus className="w-4 h-4 text-[#999999]" />
                     <span>React</span>
                   </button>
-                  {isOwn && message.messageType === 'text' && (
+                  {canEditMessageOrCaption && (
                     <button
                       type="button"
                       onClick={() => {
@@ -590,7 +844,9 @@ export function MessageBubble({
                       className="w-full flex items-center gap-2.5 px-3.5 py-2 text-sm text-white hover:bg-[#303030] cursor-pointer"
                     >
                       <Edit3 className="w-4 h-4 text-[#999999]" />
-                      <span>Edit</span>
+                      <span>
+                        {message.messageType === 'text' ? 'Edit' : 'Edit caption'}
+                      </span>
                     </button>
                   )}
                   {onPin && canModerate && (
