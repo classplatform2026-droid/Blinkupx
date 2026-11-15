@@ -18,8 +18,13 @@ import {
   uploadMediaBuffer,
   verifyLocalMediaSignature,
 } from '../services/mediaService.ts';
+import {
+  getViewerRelationshipContext,
+  PUBLIC_USER_SELECT,
+  serializeUserWithPrivacy,
+} from '../services/privacyService.ts';
 import { AppError } from '../utils/errors.ts';
-import { serializePublicUser } from '../utils/serializers.ts';
+import type { SerializedPublicUser } from '../utils/serializers.ts';
 
 export async function globalSearch(req: AuthenticatedRequest, res: Response) {
   const userId = req.userId!;
@@ -102,16 +107,20 @@ export async function globalSearch(req: AuthenticatedRequest, res: Response) {
     });
   }
 
-  let people: ReturnType<typeof serializePublicUser>[] = [];
+  let people: SerializedPublicUser[] = [];
   if (filter === 'all' || filter === 'people') {
     const users = await User.find({
       _id: { $ne: new Types.ObjectId(userId) },
       isVerified: true,
       $or: [{ fullName: regex }, { username: regex }],
     })
-      .select('fullName username avatar bio onlineStatus lastSeen')
+      .select(PUBLIC_USER_SELECT)
       .limit(20);
-    people = users.map(serializePublicUser);
+    const viewerContext = await getViewerRelationshipContext(
+      userId,
+      users.map((u) => u._id.toString())
+    );
+    people = users.map((u) => serializeUserWithPrivacy(u, viewerContext));
   }
 
   let groups: Array<{

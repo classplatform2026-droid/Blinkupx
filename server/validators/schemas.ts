@@ -49,6 +49,28 @@ export const resetPasswordSchema = z.object({
   newPassword: z.string().min(8, 'Password must be at least 8 characters').max(128),
 });
 
+export const privacyVisibilitySchema = z.enum(['everyone', 'contacts', 'nobody']);
+export const soundToneSchema = z.enum(['chime', 'ping', 'pop', 'soft']);
+
+export const privacySettingsSchema = z.object({
+  lastSeen: privacyVisibilitySchema.optional(),
+  onlineStatus: privacyVisibilitySchema.optional(),
+  profilePhoto: privacyVisibilitySchema.optional(),
+  about: privacyVisibilitySchema.optional(),
+  readReceipts: z.boolean().optional(),
+});
+
+export const notificationSettingsSchema = z.object({
+  privateMessages: z.boolean().optional(),
+  groupMessages: z.boolean().optional(),
+  communityMessages: z.boolean().optional(),
+  communityActivity: z.boolean().optional(),
+  soundEnabled: z.boolean().optional(),
+  soundTone: soundToneSchema.optional(),
+  messagePreview: z.boolean().optional(),
+  vibrationEnabled: z.boolean().optional(),
+});
+
 export const updateProfileSchema = z.object({
   fullName: z.string().trim().min(2).max(60).optional(),
   username: z
@@ -67,6 +89,8 @@ export const updateProfileSchema = z.object({
       typingIndicators: z.boolean().optional(),
       autoDownloadMedia: z.boolean().optional(),
       language: z.string().min(2).max(10).optional(),
+      privacy: privacySettingsSchema.optional(),
+      notifications: notificationSettingsSchema.optional(),
     })
     .optional(),
 });

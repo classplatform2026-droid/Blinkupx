@@ -19,7 +19,10 @@ import { CommunitySettingsPage } from './pages/community/CommunitySettingsPage';
 import { CreateCommunityPage } from './pages/community/CreateCommunityPage';
 import { GroupChatPage } from './pages/community/GroupChatPage';
 import { AppSettingsPage } from './pages/profile/AppSettingsPage';
+import { BlockedContactsPage } from './pages/profile/BlockedContactsPage';
 import { EditProfilePage } from './pages/profile/EditProfilePage';
+import { NotificationSettingsPage } from './pages/profile/NotificationSettingsPage';
+import { PrivacySettingsPage } from './pages/profile/PrivacySettingsPage';
 import { ProfilePage } from './pages/profile/ProfilePage';
 import { PublicProfilePage } from './pages/profile/PublicProfilePage';
 
@@ -214,6 +217,30 @@ export default function App() {
                 element={
                   <ProtectedRoute>
                     <AppSettingsPage />
+                  </ProtectedRoute>
+                }
+              />
+              <Route
+                path="/profile/privacy"
+                element={
+                  <ProtectedRoute>
+                    <PrivacySettingsPage />
+                  </ProtectedRoute>
+                }
+              />
+              <Route
+                path="/profile/blocked"
+                element={
+                  <ProtectedRoute>
+                    <BlockedContactsPage />
+                  </ProtectedRoute>
+                }
+              />
+              <Route
+                path="/profile/notifications"
+                element={
+                  <ProtectedRoute>
+                    <NotificationSettingsPage />
                   </ProtectedRoute>
                 }
               />

@@ -10,9 +10,16 @@ import {
 import { Conversation } from '../models/Conversation.ts';
 import { Message } from '../models/Message.ts';
 import { User } from '../models/User.ts';
+import {
+  getBlockRelationship,
+  getViewerRelationshipContext,
+  PUBLIC_USER_SELECT,
+  serializeUserWithPrivacy,
+  type PrivacyTargetUserLike,
+} from '../services/privacyService.ts';
 import { getIO } from '../sockets/index.ts';
 import { AppError } from '../utils/errors.ts';
-import { serializePublicUser } from '../utils/serializers.ts';
+import { resolveUserSettings } from '../utils/serializers.ts';
 import {
   createCommunitySchema,
   handleJoinRequestSchema,
@@ -20,6 +27,43 @@ import {
   transferOwnershipSchema,
   updateCommunitySettingsSchema,
 } from '../validators/schemas.ts';
+
+async function emitCommunityActivityNotification(
+  recipientIds: string[],
+  payload: {
+    event:
+      | 'join_request'
+      | 'request_resolved'
+      | 'invited'
+      | 'member_updated'
+      | 'removed'
+      | 'deleted';
+    communityId: string;
+    communityName: string;
+    title: string;
+    body: string;
+  }
+) {
+  const io = getIO();
+  if (!io || recipientIds.length === 0) return;
+
+  const uniqueIds = Array.from(new Set(recipientIds));
+  const users = await User.find({ _id: { $in: uniqueIds } })
+    .select('settings')
+    .lean();
+
+  for (const u of users) {
+    const notif = resolveUserSettings(u.settings).notifications;
+    if (!notif.communityActivity) continue;
+    io.to(`user:${u._id.toString()}`).emit('notification:community', {
+      ...payload,
+      soundEnabled: notif.soundEnabled,
+      soundTone: notif.soundTone,
+      vibrationEnabled: notif.vibrationEnabled,
+      createdAt: new Date().toISOString(),
+    });
+  }
+}
 
 const DEFAULT_SETTINGS: ICommunitySettings = {
   whoCanInvite: 'admins',
@@ -229,8 +273,8 @@ export async function getCommunity(req: AuthenticatedRequest, res: Response) {
   assertValidObjectId(req.params.id);
 
   const community = await Community.findById(req.params.id)
-    .populate('members.userId', 'fullName username avatar bio onlineStatus lastSeen')
-    .populate('pendingRequests', 'fullName username avatar bio onlineStatus lastSeen');
+    .populate('members.userId', PUBLIC_USER_SELECT)
+    .populate('pendingRequests', PUBLIC_USER_SELECT);
 
   if (!community) {
     throw new AppError('Community not found.', 404, 'COMMUNITY_NOT_FOUND');
@@ -284,12 +328,27 @@ export async function getCommunity(req: AuthenticatedRequest, res: Response) {
   const canInvite = canInviteByRole(myRole, settings);
   const isOwner = myRole === 'owner';
 
+  const targetIds = Array.from(
+    new Set([
+      ...community.members
+        .filter((m) => m.userId)
+        .map((m) => (m.userId as unknown as PrivacyTargetUserLike)._id.toString()),
+      ...community.pendingRequests
+        .filter(Boolean)
+        .map((u) => (u as unknown as PrivacyTargetUserLike)._id.toString()),
+    ])
+  );
+  const viewerContext = await getViewerRelationshipContext(userId, targetIds);
+
   const serializedMembers = community.members
     .filter((m) => m.userId)
     .map((m) => ({
       role: m.role,
       joinedAt: m.joinedAt,
-      user: serializePublicUser(m.userId as unknown as Parameters<typeof serializePublicUser>[0]),
+      user: serializeUserWithPrivacy(
+        m.userId as unknown as PrivacyTargetUserLike,
+        viewerContext
+      ),
     }));
 
   // Public preview for non-members: show details + admins only if needed, hide chat conversationId
@@ -327,7 +386,10 @@ export async function getCommunity(req: AuthenticatedRequest, res: Response) {
         ? community.pendingRequests
             .filter(Boolean)
             .map((u) =>
-              serializePublicUser(u as unknown as Parameters<typeof serializePublicUser>[0])
+              serializeUserWithPrivacy(
+                u as unknown as PrivacyTargetUserLike,
+                viewerContext
+              )
             )
         : [],
       createdAt: community.createdAt,
@@ -343,8 +405,8 @@ export async function listCommunityMembers(req: AuthenticatedRequest, res: Respo
   const filter = String(req.query.role || 'all').toLowerCase();
 
   const community = await Community.findById(req.params.id)
-    .populate('members.userId', 'fullName username avatar bio onlineStatus lastSeen')
-    .populate('pendingRequests', 'fullName username avatar bio onlineStatus lastSeen');
+    .populate('members.userId', PUBLIC_USER_SELECT)
+    .populate('pendingRequests', PUBLIC_USER_SELECT);
 
   if (!community) {
     throw new AppError('Community not found.', 404, 'COMMUNITY_NOT_FOUND');
@@ -366,6 +428,18 @@ export async function listCommunityMembers(req: AuthenticatedRequest, res: Respo
   const myRole = selfMember.role;
   const canManageRequests = myRole === 'owner' || myRole === 'admin';
 
+  const targetIds = Array.from(
+    new Set([
+      ...community.members
+        .filter((m) => m.userId)
+        .map((m) => (m.userId as unknown as PrivacyTargetUserLike)._id.toString()),
+      ...community.pendingRequests
+        .filter(Boolean)
+        .map((u) => (u as unknown as PrivacyTargetUserLike)._id.toString()),
+    ])
+  );
+  const viewerContext = await getViewerRelationshipContext(userId, targetIds);
+
   const roleWeight: Record<CommunityRole, number> = {
     owner: 0,
     admin: 1,
@@ -378,7 +452,10 @@ export async function listCommunityMembers(req: AuthenticatedRequest, res: Respo
     .map((m) => ({
       role: m.role,
       joinedAt: m.joinedAt,
-      user: serializePublicUser(m.userId as unknown as Parameters<typeof serializePublicUser>[0]),
+      user: serializeUserWithPrivacy(
+        m.userId as unknown as PrivacyTargetUserLike,
+        viewerContext
+      ),
     }))
     .sort((a, b) => {
       const diff = roleWeight[a.role] - roleWeight[b.role];
@@ -415,7 +492,10 @@ export async function listCommunityMembers(req: AuthenticatedRequest, res: Respo
     ? community.pendingRequests
         .filter(Boolean)
         .map((u) =>
-          serializePublicUser(u as unknown as Parameters<typeof serializePublicUser>[0])
+          serializeUserWithPrivacy(
+            u as unknown as PrivacyTargetUserLike,
+            viewerContext
+          )
         )
     : [];
 
@@ -480,11 +560,11 @@ export async function joinCommunity(req: AuthenticatedRequest, res: Response) {
 
     // Notify all community Owners & Admins in real time
     const io = getIO();
-    if (io) {
-      const adminIds = community.members
-        .filter((m) => m.role === 'owner' || m.role === 'admin')
-        .map((m) => m.userId.toString());
+    const adminIds = community.members
+      .filter((m) => m.role === 'owner' || m.role === 'admin')
+      .map((m) => m.userId.toString());
 
+    if (io) {
       for (const adminId of adminIds) {
         io.to(`user:${adminId}`).emit('community:join_request', {
           communityId: community._id.toString(),
@@ -501,6 +581,14 @@ export async function joinCommunity(req: AuthenticatedRequest, res: Response) {
         communityId: community._id.toString(),
       });
     }
+
+    await emitCommunityActivityNotification(adminIds, {
+      event: 'join_request',
+      communityId: community._id.toString(),
+      communityName: community.name,
+      title: community.name,
+      body: `${req.user!.fullName} requested to join ${community.name}.`,
+    });
 
     return res.json({
       success: true,
@@ -779,6 +867,17 @@ export async function handleJoinRequest(req: AuthenticatedRequest, res: Response
     communityId: community._id.toString(),
   });
 
+  await emitCommunityActivityNotification([targetUserId], {
+    event: 'request_resolved',
+    communityId: community._id.toString(),
+    communityName: community.name,
+    title: community.name,
+    body:
+      decision === 'approve'
+        ? `Your request to join ${community.name} was approved.`
+        : `Your request to join ${community.name} was declined.`,
+  });
+
   res.json({
     success: true,
     message: `Request ${decision === 'approve' ? 'approved' : 'declined'}.`,
@@ -822,13 +921,29 @@ export async function inviteMembers(req: AuthenticatedRequest, res: Response) {
   }
 
   const existingMemberIds = new Set(community.members.map((m) => m.userId.toString()));
-  const addedUsers = users.filter((u) => !existingMemberIds.has(u._id.toString()));
+  const nonMembers = users.filter((u) => !existingMemberIds.has(u._id.toString()));
 
-  if (addedUsers.length === 0) {
+  if (nonMembers.length === 0) {
     throw new AppError(
       'Selected users are already members of this community.',
       409,
       'ALREADY_MEMBER'
+    );
+  }
+
+  const addedUsers = [];
+  for (const candidate of nonMembers) {
+    const rel = await getBlockRelationship(userId, candidate._id.toString());
+    if (!rel.blocked) {
+      addedUsers.push(candidate);
+    }
+  }
+
+  if (addedUsers.length === 0) {
+    throw new AppError(
+      'Selected users cannot be invited due to blocking restrictions.',
+      403,
+      'USER_BLOCKED'
     );
   }
 
@@ -915,6 +1030,17 @@ export async function inviteMembers(req: AuthenticatedRequest, res: Response) {
     io?.to(`conversation:${conv._id.toString()}`).emit('community:updated', {
       communityId: community._id.toString(),
     });
+
+    await emitCommunityActivityNotification(
+      addedUsers.map((u) => u._id.toString()),
+      {
+        event: 'invited',
+        communityId: community._id.toString(),
+        communityName: community.name,
+        title: community.name,
+        body: `${req.user!.fullName} added you to ${community.name}.`,
+      }
+    );
   }
 
   res.status(201).json({
@@ -977,6 +1103,14 @@ export async function updateMemberRole(req: AuthenticatedRequest, res: Response)
     communityId: community._id.toString(),
     communityName: community.name,
     role,
+  });
+
+  await emitCommunityActivityNotification([memberId], {
+    event: 'member_updated',
+    communityId: community._id.toString(),
+    communityName: community.name,
+    title: community.name,
+    body: `Your role in ${community.name} was updated to ${role}.`,
   });
 
   res.json({ success: true, message: 'Member role updated.' });
@@ -1067,6 +1201,14 @@ export async function removeMember(req: AuthenticatedRequest, res: Response) {
   io?.to(`user:${memberId}`).emit('community:removed', {
     communityId: community._id.toString(),
     communityName: community.name,
+  });
+
+  await emitCommunityActivityNotification([memberId], {
+    event: 'removed',
+    communityId: community._id.toString(),
+    communityName: community.name,
+    title: community.name,
+    body: `You were removed from ${community.name}.`,
   });
 
   res.json({ success: true, message: 'Member removed from community.' });
@@ -1255,6 +1397,17 @@ export async function deleteCommunity(req: AuthenticatedRequest, res: Response) 
       communityName: community.name,
     });
   }
+
+  await emitCommunityActivityNotification(
+    memberIds.filter((id) => id !== userId),
+    {
+      event: 'deleted',
+      communityId: community._id.toString(),
+      communityName: community.name,
+      title: community.name,
+      body: `${community.name} was deleted by the owner.`,
+    }
+  );
 
   res.json({ success: true, message: 'Community deleted permanently.' });
 }

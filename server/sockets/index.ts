@@ -6,6 +6,8 @@ import { AUTH_COOKIE_NAME, type JwtPayload } from '../middleware/auth.ts';
 import { Conversation } from '../models/Conversation.ts';
 import { Message } from '../models/Message.ts';
 import { User } from '../models/User.ts';
+import { canViewPrivacyField, getBlockRelationship } from '../services/privacyService.ts';
+import { resolveUserSettings } from '../utils/serializers.ts';
 
 let ioInstance: Server | null = null;
 const userSockets = new Map<string, Set<string>>();
@@ -30,6 +32,83 @@ export function getIO(): Server | null {
 export function isUserConnected(userId: string): boolean {
   const set = userSockets.get(userId);
   return Boolean(set && set.size > 0);
+}
+
+export async function emitPresenceToAuthorizedViewers(targetUserId: string): Promise<void> {
+  const io = ioInstance;
+  if (!io) return;
+
+  const connectedViewerIds = Array.from(userSockets.keys());
+  if (connectedViewerIds.length === 0) return;
+
+  const targetUser = await User.findById(targetUserId).select(
+    'onlineStatus lastSeen settings blockedUsers'
+  );
+  if (!targetUser) return;
+
+  const targetPrivacy = resolveUserSettings(targetUser.settings).privacy;
+  const targetBlockedSet = new Set(
+    (targetUser.blockedUsers || []).map((id) => id.toString())
+  );
+
+  // Batch load direct contacts of targetUser and blockedUsers of connected viewers
+  const [directConvs, viewers] = await Promise.all([
+    Conversation.find({
+      type: 'direct',
+      'participants.userId': targetUser._id,
+    })
+      .select('participants.userId')
+      .lean(),
+    User.find({ _id: { $in: connectedViewerIds } })
+      .select('blockedUsers')
+      .lean(),
+  ]);
+
+  const contactSet = new Set<string>();
+  for (const conv of directConvs) {
+    for (const part of conv.participants) {
+      const pid = part.userId.toString();
+      if (pid !== targetUserId) contactSet.add(pid);
+    }
+  }
+
+  const viewerBlockedMap = new Map<string, Set<string>>();
+  for (const v of viewers) {
+    viewerBlockedMap.set(
+      v._id.toString(),
+      new Set((v.blockedUsers || []).map((id) => id.toString()))
+    );
+  }
+
+  for (const viewerId of connectedViewerIds) {
+    const isSelf = viewerId === targetUserId;
+    const isBlockedPair =
+      !isSelf &&
+      (targetBlockedSet.has(viewerId) ||
+        Boolean(viewerBlockedMap.get(viewerId)?.has(targetUserId)));
+    const isContact = !isSelf && !isBlockedPair && contactSet.has(viewerId);
+
+    const canViewOnline = canViewPrivacyField(
+      targetPrivacy.onlineStatus,
+      isSelf,
+      isContact,
+      isBlockedPair
+    );
+    const canViewLastSeen = canViewPrivacyField(
+      targetPrivacy.lastSeen,
+      isSelf,
+      isContact,
+      isBlockedPair
+    );
+
+    io.to(`user:${viewerId}`).emit('user:status', {
+      userId: targetUserId,
+      onlineStatus: canViewOnline ? Boolean(targetUser.onlineStatus) : false,
+      lastSeen: canViewLastSeen ? targetUser.lastSeen || null : null,
+      lastSeenHidden: !canViewLastSeen,
+      onlineHidden: !canViewOnline,
+    });
+  }
 }
 
 export function initSocketServer(httpServer: HttpServer): Server {
@@ -100,8 +179,7 @@ export function initSocketServer(httpServer: HttpServer): Server {
         onlineStatus: true,
         lastSeen: new Date(),
       });
-      io.emit('user:online', { userId, onlineStatus: true, lastSeen: new Date() });
-      io.emit('user:status', { userId, onlineStatus: true, lastSeen: new Date() });
+      await emitPresenceToAuthorizedViewers(userId);
     }
 
     // Join a conversation or group room dynamically after membership verification
@@ -126,8 +204,17 @@ export function initSocketServer(httpServer: HttpServer): Server {
       const conv = await Conversation.findOne({
         _id: payload.conversationId,
         'participants.userId': userId,
-      }).select('_id');
+      }).select('_id type participants.userId');
       if (!conv) return;
+
+      if (conv.type === 'direct') {
+        const peer = conv.participants.find((p) => p.userId.toString() !== userId);
+        if (peer) {
+          const rel = await getBlockRelationship(userId, peer.userId.toString());
+          if (rel.blocked) return;
+        }
+      }
+
       socket.to(`conversation:${payload.conversationId}`).emit('typing:start', {
         conversationId: payload.conversationId,
         userId,
@@ -140,8 +227,17 @@ export function initSocketServer(httpServer: HttpServer): Server {
       const conv = await Conversation.findOne({
         _id: payload.conversationId,
         'participants.userId': userId,
-      }).select('_id');
+      }).select('_id type participants.userId');
       if (!conv) return;
+
+      if (conv.type === 'direct') {
+        const peer = conv.participants.find((p) => p.userId.toString() !== userId);
+        if (peer) {
+          const rel = await getBlockRelationship(userId, peer.userId.toString());
+          if (rel.blocked) return;
+        }
+      }
+
       socket.to(`conversation:${payload.conversationId}`).emit('typing:stop', {
         conversationId: payload.conversationId,
         userId,
@@ -155,8 +251,16 @@ export function initSocketServer(httpServer: HttpServer): Server {
         const conv = await Conversation.findOne({
           _id: payload.conversationId,
           'participants.userId': userId,
-        }).select('_id');
+        }).select('_id type participants.userId');
         if (!conv) return;
+
+        if (conv.type === 'direct') {
+          const peer = conv.participants.find((p) => p.userId.toString() !== userId);
+          if (peer) {
+            const rel = await getBlockRelationship(userId, peer.userId.toString());
+            if (rel.blocked) return;
+          }
+        }
 
         await Message.updateMany(
           {
@@ -196,6 +300,7 @@ export function initSocketServer(httpServer: HttpServer): Server {
       if (!conv) return;
 
       const user = await User.findById(userId).select('settings');
+      const resolved = resolveUserSettings(user?.settings);
       const now = new Date();
 
       await Conversation.updateOne(
@@ -203,7 +308,46 @@ export function initSocketServer(httpServer: HttpServer): Server {
         { $set: { 'participants.$.lastReadAt': now } }
       );
 
-      if (user?.settings?.readReceipts !== false) {
+      // Keep delivery tracking independent from read receipts
+      const undelivered = await Message.find({
+        conversationId: payload.conversationId,
+        senderId: { $ne: userId },
+        deliveredTo: { $ne: userId },
+      }).select('_id');
+
+      if (undelivered.length > 0) {
+        const deliveredIds = undelivered.map((m) => m._id.toString());
+        await Message.updateMany(
+          { _id: { $in: deliveredIds } },
+          { $addToSet: { deliveredTo: userId } }
+        );
+        await Message.updateMany(
+          { _id: { $in: deliveredIds }, deliveryStatus: 'sent' },
+          { $set: { deliveryStatus: 'delivered' } }
+        );
+        io.to(`conversation:${payload.conversationId}`).emit('message:delivered', {
+          conversationId: payload.conversationId,
+          messageIds: deliveredIds,
+          userId,
+        });
+      }
+
+      let shouldSendReadReceipt = true;
+      if (conv.type === 'direct') {
+        if (!resolved.privacy.readReceipts) {
+          shouldSendReadReceipt = false;
+        } else {
+          const peer = conv.participants.find((p) => p.userId.toString() !== userId);
+          if (peer) {
+            const rel = await getBlockRelationship(userId, peer.userId.toString());
+            if (rel.blocked) {
+              shouldSendReadReceipt = false;
+            }
+          }
+        }
+      }
+
+      if (shouldSendReadReceipt) {
         const unread = await Message.find({
           conversationId: payload.conversationId,
           senderId: { $ne: userId },
@@ -241,8 +385,7 @@ export function initSocketServer(httpServer: HttpServer): Server {
             onlineStatus: false,
             lastSeen,
           });
-          io.emit('user:offline', { userId, onlineStatus: false, lastSeen });
-          io.emit('user:status', { userId, onlineStatus: false, lastSeen });
+          await emitPresenceToAuthorizedViewers(userId);
         }
       }
     });

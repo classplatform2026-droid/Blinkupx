@@ -2,8 +2,13 @@ import type { Response } from 'express';
 import { Types } from 'mongoose';
 import type { AuthenticatedRequest } from '../middleware/auth.ts';
 import { CallHistory } from '../models/CallHistory.ts';
+import {
+  getViewerRelationshipContext,
+  PUBLIC_USER_SELECT,
+  serializeUserWithPrivacy,
+  type PrivacyTargetUserLike,
+} from '../services/privacyService.ts';
 import { AppError } from '../utils/errors.ts';
-import { serializePublicUser } from '../utils/serializers.ts';
 
 export async function listCallHistory(req: AuthenticatedRequest, res: Response) {
   const userId = req.userId!;
@@ -19,9 +24,21 @@ export async function listCallHistory(req: AuthenticatedRequest, res: Response) 
   }
 
   const logs = await CallHistory.find(query)
-    .populate('contactId', 'fullName username avatar bio onlineStatus lastSeen')
+    .populate('contactId', PUBLIC_USER_SELECT)
     .sort({ createdAt: -1 })
     .limit(100);
+
+  const contactIds = Array.from(
+    new Set(
+      logs
+        .map((entry) => {
+          const c = entry.contactId as unknown as PrivacyTargetUserLike | null;
+          return c?._id ? c._id.toString() : '';
+        })
+        .filter(Boolean)
+    )
+  );
+  const viewerContext = await getViewerRelationshipContext(userId, contactIds);
 
   let serialized = logs.map((entry) => ({
     id: entry._id.toString(),
@@ -31,8 +48,9 @@ export async function listCallHistory(req: AuthenticatedRequest, res: Response) 
     duration: entry.duration,
     createdAt: entry.createdAt,
     contact: entry.contactId
-      ? serializePublicUser(
-          entry.contactId as unknown as Parameters<typeof serializePublicUser>[0]
+      ? serializeUserWithPrivacy(
+          entry.contactId as unknown as PrivacyTargetUserLike,
+          viewerContext
         )
       : null,
   }));

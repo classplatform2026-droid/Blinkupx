@@ -1,13 +1,16 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ArrowLeft,
+  Ban,
   BellOff,
   Images,
   MoreVertical,
   Phone,
   Pin,
   Search,
+  ShieldCheck,
   Trash2,
+  User as UserIcon,
   Video,
   X,
 } from 'lucide-react';
@@ -27,6 +30,7 @@ import {
   conversationApi,
   extractApiError,
   messageApi,
+  userApi,
 } from '../../services/api';
 import type { Conversation, Message, MessageAttachment } from '../../types';
 import { formatDateSeparator, formatLastSeen } from '../../utils/formatters';
@@ -36,7 +40,7 @@ export function MessageScreen({ conversationId }: { conversationId: string }) {
   const [searchParams] = useSearchParams();
   const highlightId = searchParams.get('highlight');
 
-  const { user } = useAuth();
+  const { user, setAuthenticatedUser } = useAuth();
   const { socket, presenceMap, typingMap } = useSocket();
   const { showToast } = useToast();
 
@@ -53,6 +57,8 @@ export function MessageScreen({ conversationId }: { conversationId: string }) {
   const [forwardTargets, setForwardTargets] = useState<Conversation[]>([]);
   const [previewImage, setPreviewImage] = useState<string | null>(null);
   const [callUnavailableModal, setCallUnavailableModal] = useState<'voice' | 'video' | null>(null);
+  const [blockModalOpen, setBlockModalOpen] = useState(false);
+  const [blockBusy, setBlockBusy] = useState(false);
 
   const [inChatSearchOpen, setInChatSearchOpen] = useState(false);
   const [inChatQuery, setInChatQuery] = useState('');
@@ -94,6 +100,21 @@ export function MessageScreen({ conversationId }: { conversationId: string }) {
   useEffect(() => {
     loadThread();
   }, [loadThread]);
+
+  useEffect(() => {
+    const refreshConversationMeta = async () => {
+      try {
+        const fresh = await conversationApi.getById(conversationId);
+        setConversation(fresh);
+      } catch {
+        // Ignore background refresh error
+      }
+    };
+    window.addEventListener('blinkupz:relationship-updated', refreshConversationMeta);
+    return () => {
+      window.removeEventListener('blinkupz:relationship-updated', refreshConversationMeta);
+    };
+  }, [conversationId]);
 
   // Deterministic scroll when pendingScrollId or messages commit
   useEffect(() => {
@@ -443,22 +464,66 @@ export function MessageScreen({ conversationId }: { conversationId: string }) {
     conversation.type === 'direct'
       ? conversation.participants.find((p) => p.userId !== user?.id)
       : null;
+  const isBlockedPair = Boolean(
+    conversation.type === 'direct' &&
+      (conversation.isBlockedByMe || conversation.hasBlockedMe)
+  );
   const peerLive = peer ? presenceMap[peer.userId] : undefined;
-  const peerOnline = peerLive ? peerLive.onlineStatus : conversation.onlineStatus;
-  const peerLastSeen = peerLive ? peerLive.lastSeen : conversation.lastSeen;
+  const peerOnline = isBlockedPair
+    ? false
+    : peerLive
+      ? peerLive.onlineStatus
+      : conversation.onlineStatus;
+  const peerLastSeen = isBlockedPair
+    ? null
+    : peerLive
+      ? peerLive.lastSeen
+      : conversation.lastSeen;
+  const peerLastSeenHidden = Boolean(
+    isBlockedPair ||
+      peerLive?.lastSeenHidden ||
+      conversation.peerPrivacy?.lastSeenHidden
+  );
 
-  const typingList = typingMap[conversationId] || [];
+  const typingList = isBlockedPair ? [] : typingMap[conversationId] || [];
   let subtitle = '';
-  if (typingList.length > 0) {
+  if (isBlockedPair) {
+    subtitle = conversation.isBlockedByMe ? 'Blocked' : 'Messaging unavailable';
+  } else if (typingList.length > 0) {
     subtitle =
       conversation.type === 'direct'
         ? 'typing...'
         : `${typingList.map((t) => t.username).join(', ')} typing...`;
   } else if (conversation.type === 'direct') {
-    subtitle = peerOnline ? 'Online' : formatLastSeen(peerLastSeen);
+    subtitle = peerOnline
+      ? 'Online'
+      : formatLastSeen(peerLastSeen, peerLastSeenHidden);
   } else {
     subtitle = `${conversation.participants.length} members`;
   }
+
+  const handleToggleBlockPeer = async () => {
+    if (!peer) return;
+    setBlockBusy(true);
+    try {
+      if (conversation.isBlockedByMe) {
+        const res = await userApi.unblockUser(peer.userId);
+        if (res.data.user) setAuthenticatedUser(res.data.user);
+        showToast(`${conversation.name} unblocked.`, 'success');
+      } else {
+        const res = await userApi.blockUser(peer.userId);
+        if (res.data.user) setAuthenticatedUser(res.data.user);
+        showToast(`${conversation.name} blocked.`, 'info');
+      }
+      setBlockModalOpen(false);
+      const fresh = await conversationApi.getById(conversationId);
+      setConversation(fresh);
+    } catch (err) {
+      showToast(extractApiError(err).message, 'error');
+    } finally {
+      setBlockBusy(false);
+    }
+  };
 
   const filteredMessages = inChatQuery.trim()
     ? messages.filter((m) =>
@@ -548,6 +613,15 @@ export function MessageScreen({ conversationId }: { conversationId: string }) {
               </button>
             }
             options={[
+              ...(conversation.type === 'direct' && conversation.username
+                ? [
+                    {
+                      label: 'View profile',
+                      icon: <UserIcon className="w-4 h-4" />,
+                      onClick: () => navigate(`/u/${conversation.username}`),
+                    },
+                  ]
+                : []),
               {
                 label: inChatSearchOpen ? 'Close search' : 'Search messages',
                 icon: <Search className="w-4 h-4" />,
@@ -585,6 +659,22 @@ export function MessageScreen({ conversationId }: { conversationId: string }) {
                   showToast(next.isMuted ? 'Chat muted' : 'Chat unmuted', 'success');
                 },
               },
+              ...(conversation.type === 'direct' && peer
+                ? [
+                    {
+                      label: conversation.isBlockedByMe
+                        ? 'Unblock contact'
+                        : 'Block contact',
+                      icon: conversation.isBlockedByMe ? (
+                        <ShieldCheck className="w-4 h-4" />
+                      ) : (
+                        <Ban className="w-4 h-4" />
+                      ),
+                      danger: !conversation.isBlockedByMe,
+                      onClick: () => setBlockModalOpen(true),
+                    },
+                  ]
+                : []),
               {
                 label: 'Delete chat',
                 icon: <Trash2 className="w-4 h-4" />,
@@ -753,24 +843,46 @@ export function MessageScreen({ conversationId }: { conversationId: string }) {
         <div ref={bottomRef} />
       </div>
 
-      {/* Composer */}
-      <MessageInput
-        enterToSend={user?.settings?.enterToSend ?? true}
-        replyingTo={replyingTo}
-        editingMessage={editingMessage}
-        onCancelReply={() => setReplyingTo(null)}
-        onCancelEdit={() => setEditingMessage(null)}
-        onTypingStart={() => {
-          if (user?.settings?.typingIndicators !== false) {
-            socket?.emit('typing:start', { conversationId });
-          }
-        }}
-        onTypingStop={() => {
-          socket?.emit('typing:stop', { conversationId });
-        }}
-        onSendMessage={handleSendMessage}
-        onSaveEdit={handleSaveEdit}
-      />
+      {/* Composer or Blocked Notice */}
+      {isBlockedPair ? (
+        <div className="px-4 py-3.5 border-t border-[#303030] bg-[#202020] flex flex-wrap items-center justify-between gap-3 shrink-0">
+          <div className="flex items-center gap-2.5 min-w-0">
+            <Ban className="w-4 h-4 text-[#E5484D] shrink-0" />
+            <p className="text-xs sm:text-sm text-[#999999]">
+              {conversation.isBlockedByMe
+                ? 'You blocked this contact. Unblock them to send messages.'
+                : 'You cannot send messages to this contact.'}
+            </p>
+          </div>
+          {conversation.isBlockedByMe && (
+            <PrimaryButton
+              variant="secondary"
+              onClick={() => setBlockModalOpen(true)}
+              className="min-h-[34px] py-1 px-3 text-xs shrink-0"
+            >
+              Unblock
+            </PrimaryButton>
+          )}
+        </div>
+      ) : (
+        <MessageInput
+          enterToSend={user?.settings?.enterToSend ?? true}
+          replyingTo={replyingTo}
+          editingMessage={editingMessage}
+          onCancelReply={() => setReplyingTo(null)}
+          onCancelEdit={() => setEditingMessage(null)}
+          onTypingStart={() => {
+            if (user?.settings?.typingIndicators !== false) {
+              socket?.emit('typing:start', { conversationId });
+            }
+          }}
+          onTypingStop={() => {
+            socket?.emit('typing:stop', { conversationId });
+          }}
+          onSendMessage={handleSendMessage}
+          onSaveEdit={handleSaveEdit}
+        />
+      )}
 
       {/* Forward Modal */}
       <Modal
@@ -859,6 +971,42 @@ export function MessageScreen({ conversationId }: { conversationId: string }) {
         onClose={() => setSharedMediaOpen(false)}
         onJumpToMessage={handleJumpToMessage}
       />
+
+      {/* Block / Unblock Confirmation Modal */}
+      {peer && (
+        <Modal
+          open={blockModalOpen}
+          onClose={() => setBlockModalOpen(false)}
+          title={
+            conversation.isBlockedByMe
+              ? `Unblock ${conversation.name}?`
+              : `Block ${conversation.name}?`
+          }
+        >
+          <div className="space-y-4">
+            <p className="text-sm text-[#999999] leading-relaxed">
+              {conversation.isBlockedByMe
+                ? `${conversation.name} will be able to message you and see your profile info according to your privacy settings.`
+                : `${conversation.name} will no longer be able to send you messages, start conversations, or see your online status and profile details.`}
+            </p>
+            <div className="flex justify-end gap-2">
+              <PrimaryButton
+                variant="secondary"
+                onClick={() => setBlockModalOpen(false)}
+              >
+                Cancel
+              </PrimaryButton>
+              <PrimaryButton
+                variant={conversation.isBlockedByMe ? 'primary' : 'danger'}
+                loading={blockBusy}
+                onClick={handleToggleBlockPeer}
+              >
+                {conversation.isBlockedByMe ? 'Unblock' : 'Block Contact'}
+              </PrimaryButton>
+            </div>
+          </div>
+        </Modal>
+      )}
     </div>
   );
 }

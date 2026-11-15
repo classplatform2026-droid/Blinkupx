@@ -1,16 +1,19 @@
 import { useCallback, useEffect, useState } from 'react';
 import {
+  Ban,
   Check,
   Copy,
   Edit3,
   MessageSquare,
   QrCode,
   Share2,
+  ShieldCheck,
   UserPlus,
 } from 'lucide-react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { AppHeader } from '../../components/AppHeader';
 import { BrandMark } from '../../components/BrandMark';
+import { Modal } from '../../components/Modal';
 import { PrimaryButton } from '../../components/PrimaryButton';
 import { QrCodeModal } from '../../components/QrCodeModal';
 import { ErrorState, LoadingState } from '../../components/States';
@@ -25,7 +28,7 @@ import { formatLastSeen } from '../../utils/formatters';
 export function PublicProfilePage() {
   const { username = '' } = useParams<{ username: string }>();
   const navigate = useNavigate();
-  const { user: currentUser } = useAuth();
+  const { user: currentUser, setAuthenticatedUser } = useAuth();
   const { presenceMap } = useSocket();
   const { showToast } = useToast();
 
@@ -35,6 +38,8 @@ export function PublicProfilePage() {
   const [startingChat, setStartingChat] = useState(false);
   const [copied, setCopied] = useState(false);
   const [qrOpen, setQrOpen] = useState(false);
+  const [blockConfirmOpen, setBlockConfirmOpen] = useState(false);
+  const [blockingBusy, setBlockingBusy] = useState(false);
 
   const loadProfile = useCallback(async () => {
     setLoading(true);
@@ -51,6 +56,16 @@ export function PublicProfilePage() {
 
   useEffect(() => {
     loadProfile();
+  }, [loadProfile]);
+
+  useEffect(() => {
+    const onRelationshipUpdated = () => {
+      loadProfile();
+    };
+    window.addEventListener('blinkupz:relationship-updated', onRelationshipUpdated);
+    return () => {
+      window.removeEventListener('blinkupz:relationship-updated', onRelationshipUpdated);
+    };
   }, [loadProfile]);
 
   const isOwnProfile = Boolean(currentUser && profile && currentUser.id === profile.id);
@@ -73,6 +88,28 @@ export function PublicProfilePage() {
       showToast(extractApiError(err).message, 'error');
     } finally {
       setStartingChat(false);
+    }
+  };
+
+  const handleToggleBlock = async () => {
+    if (!profile || !currentUser) return;
+    setBlockingBusy(true);
+    try {
+      if (profile.isBlockedByMe) {
+        const res = await userApi.unblockUser(profile.id);
+        if (res.data.user) setAuthenticatedUser(res.data.user);
+        showToast(`${profile.fullName} unblocked.`, 'success');
+      } else {
+        const res = await userApi.blockUser(profile.id);
+        if (res.data.user) setAuthenticatedUser(res.data.user);
+        showToast(`${profile.fullName} blocked.`, 'info');
+      }
+      setBlockConfirmOpen(false);
+      await loadProfile();
+    } catch (err) {
+      showToast(extractApiError(err).message, 'error');
+    } finally {
+      setBlockingBusy(false);
     }
   };
 
@@ -105,8 +142,23 @@ export function PublicProfilePage() {
   };
 
   const livePresence = profile ? presenceMap[profile.id] : undefined;
-  const isOnline = livePresence ? livePresence.onlineStatus : Boolean(profile?.onlineStatus);
-  const lastSeen = livePresence ? livePresence.lastSeen : profile?.lastSeen || null;
+  const isBlockedPair = Boolean(profile?.isBlockedByMe || profile?.hasBlockedMe);
+  const isOnline = isBlockedPair
+    ? false
+    : livePresence
+      ? livePresence.onlineStatus
+      : Boolean(profile?.onlineStatus);
+  const lastSeen = isBlockedPair
+    ? null
+    : livePresence
+      ? livePresence.lastSeen
+      : profile?.lastSeen || null;
+  const lastSeenHidden = Boolean(
+    isBlockedPair ||
+      livePresence?.lastSeenHidden ||
+      profile?.privacyStatus?.lastSeenHidden
+  );
+  const aboutHidden = Boolean(isBlockedPair || profile?.privacyStatus?.aboutHidden);
 
   return (
     <div className="flex-1 flex flex-col min-h-dvh lg:min-h-0 h-full bg-[#181818] text-[#FFFFFF] overflow-hidden">
@@ -169,11 +221,21 @@ export function PublicProfilePage() {
                     isOnline ? 'text-[#22C55E]' : 'text-[#999999]'
                   }`}
                 >
-                  {isOnline ? 'Online' : formatLastSeen(lastSeen)}
+                  {isBlockedPair
+                    ? profile.isBlockedByMe
+                      ? 'Blocked contact'
+                      : 'Unavailable'
+                    : isOnline
+                      ? 'Online'
+                      : formatLastSeen(lastSeen, lastSeenHidden)}
                 </p>
 
                 <p className="text-sm text-[#FFFFFF]/90 mt-4 leading-relaxed max-w-md">
-                  {profile.bio || 'Connected on BlinkUpZ.'}
+                  {aboutHidden ? (
+                    <span className="text-[#999999]">About information is hidden.</span>
+                  ) : (
+                    profile.bio || 'Connected on BlinkUpZ.'
+                  )}
                 </p>
               </div>
 
@@ -194,14 +256,38 @@ export function PublicProfilePage() {
                       </PrimaryButton>
                     </div>
                   ) : (
-                    <PrimaryButton
-                      fullWidth
-                      loading={startingChat}
-                      onClick={handleStartConversation}
-                    >
-                      <MessageSquare className="w-4 h-4" />
-                      <span>Start Conversation</span>
-                    </PrimaryButton>
+                    <div className="space-y-2.5">
+                      {profile.isBlockedByMe ? (
+                        <div className="rounded-xl bg-[#181818] border border-[#303030] p-3 text-center space-y-2">
+                          <p className="text-xs text-[#999999]">
+                            You blocked this contact. Unblock them to start a conversation.
+                          </p>
+                          <PrimaryButton
+                            variant="secondary"
+                            fullWidth
+                            onClick={() => setBlockConfirmOpen(true)}
+                          >
+                            <ShieldCheck className="w-4 h-4 text-[#22C55E]" />
+                            <span>Unblock Contact</span>
+                          </PrimaryButton>
+                        </div>
+                      ) : profile.hasBlockedMe ? (
+                        <div className="rounded-xl bg-[#181818] border border-[#303030] p-3 text-center">
+                          <p className="text-xs text-[#999999]">
+                            Messaging is unavailable for this account.
+                          </p>
+                        </div>
+                      ) : (
+                        <PrimaryButton
+                          fullWidth
+                          loading={startingChat}
+                          onClick={handleStartConversation}
+                        >
+                          <MessageSquare className="w-4 h-4" />
+                          <span>Start Conversation</span>
+                        </PrimaryButton>
+                      )}
+                    </div>
                   )
                 ) : (
                   <div className="space-y-2.5">
@@ -241,6 +327,17 @@ export function PublicProfilePage() {
                     <span>{copied ? 'Copied Link' : 'Copy Link'}</span>
                   </PrimaryButton>
                 </div>
+
+                {currentUser && !isOwnProfile && !profile.isBlockedByMe && (
+                  <button
+                    type="button"
+                    onClick={() => setBlockConfirmOpen(true)}
+                    className="w-full py-2.5 rounded-xl flex items-center justify-center gap-2 text-xs font-medium text-[#E5484D] hover:bg-[#242424] transition-colors cursor-pointer"
+                  >
+                    <Ban className="w-3.5 h-3.5" />
+                    <span>Block @{profile.username}</span>
+                  </button>
+                )}
               </div>
             </section>
           )}
@@ -249,6 +346,41 @@ export function PublicProfilePage() {
 
       {currentUser && (
         <QrCodeModal open={qrOpen} onClose={() => setQrOpen(false)} />
+      )}
+
+      {profile && (
+        <Modal
+          open={blockConfirmOpen}
+          onClose={() => setBlockConfirmOpen(false)}
+          title={
+            profile.isBlockedByMe
+              ? `Unblock ${profile.fullName}?`
+              : `Block ${profile.fullName}?`
+          }
+        >
+          <div className="space-y-4">
+            <p className="text-sm text-[#999999] leading-relaxed">
+              {profile.isBlockedByMe
+                ? `@${profile.username} will be allowed to message you and see your profile information according to your privacy settings.`
+                : `@${profile.username} will no longer be able to send you messages, start conversations with you, or view your online status and profile details.`}
+            </p>
+            <div className="flex justify-end gap-2">
+              <PrimaryButton
+                variant="secondary"
+                onClick={() => setBlockConfirmOpen(false)}
+              >
+                Cancel
+              </PrimaryButton>
+              <PrimaryButton
+                variant={profile.isBlockedByMe ? 'primary' : 'danger'}
+                loading={blockingBusy}
+                onClick={handleToggleBlock}
+              >
+                {profile.isBlockedByMe ? 'Unblock' : 'Block Contact'}
+              </PrimaryButton>
+            </div>
+          </div>
+        </Modal>
       )}
     </div>
   );

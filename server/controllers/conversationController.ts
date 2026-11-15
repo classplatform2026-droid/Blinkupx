@@ -5,22 +5,41 @@ import { Community } from '../models/Community.ts';
 import { Conversation, type IConversation } from '../models/Conversation.ts';
 import { Message } from '../models/Message.ts';
 import { User } from '../models/User.ts';
+import {
+  getBlockRelationship,
+  getViewerRelationshipContext,
+  PUBLIC_USER_SELECT,
+  serializeUserWithPrivacy,
+  type ViewerRelationshipContext,
+} from '../services/privacyService.ts';
 import { getIO } from '../sockets/index.ts';
 import { AppError } from '../utils/errors.ts';
 import { extractUrlsFromText } from '../utils/linkPreview.ts';
-import { serializePublicUser } from '../utils/serializers.ts';
+import { resolveUserSettings } from '../utils/serializers.ts';
 import { createConversationSchema } from '../validators/schemas.ts';
 
-async function formatConversation(conv: IConversation, currentUserId: string) {
+async function formatConversation(
+  conv: IConversation,
+  currentUserId: string,
+  sharedContext?: ViewerRelationshipContext
+) {
   const selfPart = conv.participants.find(
     (p) => p.userId.toString() === currentUserId
   );
 
   const participantIds = conv.participants.map((p) => p.userId);
   const users = await User.find({ _id: { $in: participantIds } }).select(
-    'fullName username avatar bio onlineStatus lastSeen'
+    PUBLIC_USER_SELECT
   );
-  const userMap = new Map(users.map((u) => [u._id.toString(), serializePublicUser(u)]));
+  const context =
+    sharedContext ||
+    (await getViewerRelationshipContext(
+      currentUserId,
+      users.map((u) => u._id.toString())
+    ));
+  const userMap = new Map(
+    users.map((u) => [u._id.toString(), serializeUserWithPrivacy(u, context)])
+  );
 
   let communityRoles: Record<string, string> = {};
   if (conv.communityId) {
@@ -75,6 +94,9 @@ async function formatConversation(conv: IConversation, currentUserId: string) {
     avatar: conv.type === 'direct' ? peer?.avatar || '' : conv.avatar,
     onlineStatus: conv.type === 'direct' ? Boolean(peer?.onlineStatus) : false,
     lastSeen: conv.type === 'direct' ? peer?.lastSeen || null : null,
+    isBlockedByMe: conv.type === 'direct' ? Boolean(peer?.isBlockedByMe) : false,
+    hasBlockedMe: conv.type === 'direct' ? Boolean(peer?.hasBlockedMe) : false,
+    peerPrivacy: conv.type === 'direct' ? peer?.privacyStatus || null : null,
     communityId: conv.communityId ? conv.communityId.toString() : null,
     participants,
     lastMessage: conv.lastMessage
@@ -156,6 +178,17 @@ export async function createConversation(req: AuthenticatedRequest, res: Respons
       throw new AppError('Selected user was not found.', 404, 'USER_NOT_FOUND');
     }
 
+    const blockRel = await getBlockRelationship(userId, peerId);
+    if (blockRel.blocked) {
+      throw new AppError(
+        blockRel.blockedByA
+          ? 'You blocked this contact. Unblock them to start a conversation.'
+          : 'You cannot start a conversation with this user.',
+        403,
+        'USER_BLOCKED'
+      );
+    }
+
     const existing = await Conversation.findOne({
       type: 'direct',
       $and: [
@@ -179,6 +212,17 @@ export async function createConversation(req: AuthenticatedRequest, res: Respons
     }
     if (uniqueMemberIds.length < 2) {
       throw new AppError('Select at least one participant for the group.', 400, 'INVALID_PARTICIPANTS');
+    }
+    for (const memberId of uniqueMemberIds) {
+      if (memberId === userId) continue;
+      const blockRel = await getBlockRelationship(userId, memberId);
+      if (blockRel.blocked) {
+        throw new AppError(
+          'Cannot add blocked contacts to a new group conversation.',
+          403,
+          'USER_BLOCKED'
+        );
+      }
     }
   }
 
@@ -319,27 +363,73 @@ export async function updateConversationMeta(req: AuthenticatedRequest, res: Res
 export async function markAllAsRead(req: AuthenticatedRequest, res: Response) {
   const userId = req.userId!;
   const now = new Date();
+  const userObjectId = new Types.ObjectId(userId);
 
-  const convs = await Conversation.find({
-    'participants.userId': new Types.ObjectId(userId),
-  }).select('_id');
+  const [convs, currentUser] = await Promise.all([
+    Conversation.find({
+      'participants.userId': userObjectId,
+    }).select('_id type participants.userId'),
+    User.findById(userObjectId).select('settings blockedUsers'),
+  ]);
+
+  const resolvedSettings = resolveUserSettings(currentUser?.settings);
+  const allowDirectReadReceipts = resolvedSettings.privacy.readReceipts;
+  const blockedSet = new Set(
+    (currentUser?.blockedUsers || []).map((id) => id.toString())
+  );
 
   await Conversation.updateMany(
-    { 'participants.userId': new Types.ObjectId(userId) },
+    { 'participants.userId': userObjectId },
     { $set: { 'participants.$.lastReadAt': now } }
   );
 
+  const allConvIds = convs.map((c) => c._id);
+
+  // Keep delivery tracking independent from read receipts
   await Message.updateMany(
     {
-      conversationId: { $in: convs.map((c) => c._id) },
-      senderId: { $ne: new Types.ObjectId(userId) },
-      readBy: { $ne: new Types.ObjectId(userId) },
+      conversationId: { $in: allConvIds },
+      senderId: { $ne: userObjectId },
+      deliveredTo: { $ne: userObjectId },
     },
     {
-      $addToSet: { readBy: new Types.ObjectId(userId), deliveredTo: new Types.ObjectId(userId) },
-      $set: { deliveryStatus: 'read' },
+      $addToSet: { deliveredTo: userObjectId },
     }
   );
+  await Message.updateMany(
+    {
+      conversationId: { $in: allConvIds },
+      senderId: { $ne: userObjectId },
+      deliveryStatus: 'sent',
+    },
+    {
+      $set: { deliveryStatus: 'delivered' },
+    }
+  );
+
+  const readReceiptConvIds = convs
+    .filter((c) => {
+      if (c.type !== 'direct') return true;
+      if (!allowDirectReadReceipts) return false;
+      const peer = c.participants.find((p) => p.userId.toString() !== userId);
+      if (peer && blockedSet.has(peer.userId.toString())) return false;
+      return true;
+    })
+    .map((c) => c._id);
+
+  if (readReceiptConvIds.length > 0) {
+    await Message.updateMany(
+      {
+        conversationId: { $in: readReceiptConvIds },
+        senderId: { $ne: userObjectId },
+        readBy: { $ne: userObjectId },
+      },
+      {
+        $addToSet: { readBy: userObjectId, deliveredTo: userObjectId },
+        $set: { deliveryStatus: 'read' },
+      }
+    );
+  }
 
   res.json({ success: true, message: 'All conversations marked as read.' });
 }

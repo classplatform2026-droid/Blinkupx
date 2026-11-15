@@ -93,3 +93,25 @@ export async function requireAuth(
     return next(new AppError('Invalid or expired session.', 401, 'UNAUTHORIZED'));
   }
 }
+
+export async function optionalAuth(
+  req: AuthenticatedRequest,
+  _res: Response,
+  next: NextFunction
+) {
+  try {
+    const token = extractTokenFromRequest(req);
+    if (!token) {
+      return next();
+    }
+    const decoded = jwt.verify(token, env.jwtSecret) as JwtPayload;
+    const user = await User.findById(decoded.sub);
+    if (user && user.isVerified) {
+      req.user = user;
+      req.userId = user._id.toString();
+    }
+  } catch {
+    // Ignore invalid/expired token for optional auth endpoints
+  }
+  next();
+}

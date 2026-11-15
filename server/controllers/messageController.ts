@@ -4,21 +4,42 @@ import type { AuthenticatedRequest } from '../middleware/auth.ts';
 import { Community } from '../models/Community.ts';
 import { Conversation } from '../models/Conversation.ts';
 import { Message, type IMessage } from '../models/Message.ts';
+import { User } from '../models/User.ts';
+import {
+  getBlockRelationship,
+  getViewerRelationshipContext,
+  PUBLIC_USER_SELECT,
+  serializeUserWithPrivacy,
+  type PrivacyTargetUserLike,
+  type ViewerRelationshipContext,
+} from '../services/privacyService.ts';
 import { getIO, isUserConnected } from '../sockets/index.ts';
 import { AppError } from '../utils/errors.ts';
 import { extractAndFetchLinkPreviews } from '../utils/linkPreview.ts';
+import { resolveUserSettings } from '../utils/serializers.ts';
 import {
   editMessageSchema,
   reactionSchema,
   sendMessageSchema,
 } from '../validators/schemas.ts';
 
-function serializeMessage(msg: IMessage) {
+function serializeMessage(msg: IMessage, viewerContext?: ViewerRelationshipContext) {
   const rawSender = msg.senderId as unknown;
   const senderObj =
     typeof rawSender === 'object' && rawSender !== null && 'fullName' in rawSender
-      ? (rawSender as { _id: { toString(): string }; fullName: string; username: string; avatar?: string })
+      ? (rawSender as PrivacyTargetUserLike)
       : null;
+
+  const senderSerialized = senderObj
+    ? viewerContext
+      ? serializeUserWithPrivacy(senderObj, viewerContext)
+      : {
+          id: senderObj._id.toString(),
+          fullName: senderObj.fullName,
+          username: senderObj.username,
+          avatar: senderObj.avatar || '',
+        }
+    : null;
 
   const rawReply = msg.replyTo as unknown;
   const replyObj =
@@ -38,12 +59,12 @@ function serializeMessage(msg: IMessage) {
     id: msg._id.toString(),
     conversationId: msg.conversationId.toString(),
     senderId: senderObj ? senderObj._id.toString() : String(msg.senderId),
-    sender: senderObj
+    sender: senderSerialized
       ? {
-          id: senderObj._id.toString(),
-          fullName: senderObj.fullName,
-          username: senderObj.username,
-          avatar: senderObj.avatar || '',
+          id: senderSerialized.id,
+          fullName: senderSerialized.fullName,
+          username: senderSerialized.username,
+          avatar: senderSerialized.avatar || '',
         }
       : null,
     content: isDeleted ? 'This message was deleted' : msg.content,
@@ -103,7 +124,7 @@ export async function listMessages(req: AuthenticatedRequest, res: Response) {
   const docs = await Message.find(query)
     .sort({ createdAt: -1 })
     .limit(limit + 1)
-    .populate('senderId', 'fullName username avatar')
+    .populate('senderId', PUBLIC_USER_SELECT)
     .populate({
       path: 'replyTo',
       select: 'content messageType deletedAt senderId',
@@ -114,10 +135,22 @@ export async function listMessages(req: AuthenticatedRequest, res: Response) {
   const pageDocs = hasMore ? docs.slice(0, limit) : docs;
   pageDocs.reverse();
 
+  const senderIds = Array.from(
+    new Set(
+      pageDocs
+        .map((d) => {
+          const s = d.senderId as unknown as { _id?: { toString(): string } };
+          return s?._id ? s._id.toString() : String(d.senderId);
+        })
+        .filter(Boolean)
+    )
+  );
+  const viewerContext = await getViewerRelationshipContext(userId, senderIds);
+
   res.json({
     success: true,
     data: {
-      messages: pageDocs.map((m) => serializeMessage(m)),
+      messages: pageDocs.map((m) => serializeMessage(m, viewerContext)),
       hasMore,
     },
   });
@@ -133,6 +166,22 @@ export async function sendMessage(req: AuthenticatedRequest, res: Response) {
   });
   if (!conv) {
     throw new AppError('Conversation not found or access denied.', 404, 'CONVERSATION_NOT_FOUND');
+  }
+
+  if (conv.type === 'direct') {
+    const peer = conv.participants.find((p) => p.userId.toString() !== userId);
+    if (peer) {
+      const blockRel = await getBlockRelationship(userId, peer.userId.toString());
+      if (blockRel.blocked) {
+        throw new AppError(
+          blockRel.blockedByA
+            ? 'You blocked this contact. Unblock them to send messages.'
+            : 'You cannot send messages to this user.',
+          403,
+          'USER_BLOCKED'
+        );
+      }
+    }
   }
 
   if (conv.communityId) {
@@ -215,7 +264,7 @@ export async function sendMessage(req: AuthenticatedRequest, res: Response) {
   await conv.save();
 
   const populated = await Message.findById(msg._id)
-    .populate('senderId', 'fullName username avatar')
+    .populate('senderId', PUBLIC_USER_SELECT)
     .populate({
       path: 'replyTo',
       select: 'content messageType deletedAt senderId',
@@ -227,11 +276,53 @@ export async function sendMessage(req: AuthenticatedRequest, res: Response) {
   const io = getIO();
   if (io) {
     io.to(`conversation:${conv._id.toString()}`).emit('message:new', serialized);
-    // Also notify user rooms in case someone joined late or hadn't subscribed to conversation room yet
+
+    const recipients = await User.find({ _id: { $in: otherParticipantIds } })
+      .select('settings blockedUsers')
+      .lean();
+    const recipientMap = new Map(recipients.map((r) => [r._id.toString(), r]));
+    const now = new Date();
+    const senderName = req.user?.fullName || serialized.sender?.fullName || 'New message';
+
     for (const pid of otherParticipantIds) {
+      const recipient = recipientMap.get(pid);
+      const isBlockedRecipient = Boolean(
+        recipient?.blockedUsers?.some((id) => id.toString() === userId)
+      );
+      if (isBlockedRecipient) continue;
+
       io.to(`user:${pid}`).emit('conversation:activity', {
         conversationId: conv._id.toString(),
         message: serialized,
+      });
+
+      const part = conv.participants.find((p) => p.userId.toString() === pid);
+      const isMuted = Boolean(part?.mutedUntil && part.mutedUntil > now);
+      if (isMuted) continue;
+
+      const notif = resolveUserSettings(recipient?.settings).notifications;
+      const categoryEnabled =
+        conv.type === 'direct'
+          ? notif.privateMessages
+          : conv.type === 'group'
+            ? notif.groupMessages
+            : notif.communityMessages;
+
+      if (!categoryEnabled) continue;
+
+      const showPreview = notif.messagePreview;
+      io.to(`user:${pid}`).emit('notification:message', {
+        id: serialized.id,
+        conversationId: conv._id.toString(),
+        conversationType: conv.type,
+        communityId: conv.communityId ? conv.communityId.toString() : null,
+        title: conv.type === 'direct' ? senderName : `${senderName} • ${conv.name}`,
+        body: showPreview ? previewText.slice(0, 120) : 'New message',
+        previewHidden: !showPreview,
+        soundEnabled: notif.soundEnabled,
+        soundTone: notif.soundTone,
+        vibrationEnabled: notif.vibrationEnabled,
+        createdAt: serialized.createdAt,
       });
     }
   }
@@ -459,7 +550,7 @@ export async function getMessagesAround(req: AuthenticatedRequest, res: Response
     Message.find({ ...baseFilter, createdAt: { $lte: target.createdAt } })
       .sort({ createdAt: -1 })
       .limit(26)
-      .populate('senderId', 'fullName username avatar')
+      .populate('senderId', PUBLIC_USER_SELECT)
       .populate({
         path: 'replyTo',
         select: 'content messageType deletedAt senderId',
@@ -468,7 +559,7 @@ export async function getMessagesAround(req: AuthenticatedRequest, res: Response
     Message.find({ ...baseFilter, createdAt: { $gt: target.createdAt } })
       .sort({ createdAt: 1 })
       .limit(26)
-      .populate('senderId', 'fullName username avatar')
+      .populate('senderId', PUBLIC_USER_SELECT)
       .populate({
         path: 'replyTo',
         select: 'content messageType deletedAt senderId',
@@ -484,11 +575,22 @@ export async function getMessagesAround(req: AuthenticatedRequest, res: Response
   const newerSlice = hasNewer ? afterDocs.slice(0, 25) : afterDocs;
 
   const combined = [...olderSlice, ...newerSlice];
+  const senderIds = Array.from(
+    new Set(
+      combined
+        .map((d) => {
+          const s = d.senderId as unknown as { _id?: { toString(): string } };
+          return s?._id ? s._id.toString() : String(d.senderId);
+        })
+        .filter(Boolean)
+    )
+  );
+  const viewerContext = await getViewerRelationshipContext(userId, senderIds);
 
   res.json({
     success: true,
     data: {
-      messages: combined.map((m) => serializeMessage(m)),
+      messages: combined.map((m) => serializeMessage(m, viewerContext)),
       hasMore,
       hasNewer,
     },

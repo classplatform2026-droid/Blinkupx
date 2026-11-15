@@ -38,7 +38,11 @@ export function formatDateSeparator(dateStr: string): string {
   return d.toLocaleDateString([], { month: 'short', day: 'numeric', year: 'numeric' });
 }
 
-export function formatLastSeen(dateStr: string | null | undefined): string {
+export function formatLastSeen(
+  dateStr: string | null | undefined,
+  hidden = false
+): string {
+  if (hidden) return 'Last seen hidden';
   if (!dateStr) return 'Offline';
   const d = new Date(dateStr);
   if (Number.isNaN(d.getTime())) return 'Offline';

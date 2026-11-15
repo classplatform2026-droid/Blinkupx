@@ -1,4 +1,26 @@
-import mongoose, { type Document, Schema } from 'mongoose';
+import mongoose, { type Document, Schema, type Types } from 'mongoose';
+
+export type PrivacyVisibility = 'everyone' | 'contacts' | 'nobody';
+export type NotificationSoundTone = 'chime' | 'ping' | 'pop' | 'soft';
+
+export interface IUserPrivacySettings {
+  lastSeen: PrivacyVisibility;
+  onlineStatus: PrivacyVisibility;
+  profilePhoto: PrivacyVisibility;
+  about: PrivacyVisibility;
+  readReceipts: boolean;
+}
+
+export interface IUserNotificationSettings {
+  privateMessages: boolean;
+  groupMessages: boolean;
+  communityMessages: boolean;
+  communityActivity: boolean;
+  soundEnabled: boolean;
+  soundTone: NotificationSoundTone;
+  messagePreview: boolean;
+  vibrationEnabled: boolean;
+}
 
 export interface IUserSettings {
   density: 'comfortable' | 'compact';
@@ -7,6 +29,8 @@ export interface IUserSettings {
   typingIndicators: boolean;
   autoDownloadMedia: boolean;
   language: string;
+  privacy: IUserPrivacySettings;
+  notifications: IUserNotificationSettings;
 }
 
 export interface IUser extends Document {
@@ -20,10 +44,14 @@ export interface IUser extends Document {
   isVerified: boolean;
   onlineStatus: boolean;
   lastSeen: Date;
+  blockedUsers: Types.ObjectId[];
   settings: IUserSettings;
   createdAt: Date;
   updatedAt: Date;
 }
+
+const PRIVACY_ENUM: PrivacyVisibility[] = ['everyone', 'contacts', 'nobody'];
+const SOUND_TONE_ENUM: NotificationSoundTone[] = ['chime', 'ping', 'pop', 'soft'];
 
 const userSchema = new Schema<IUser>(
   {
@@ -82,6 +110,10 @@ const userSchema = new Schema<IUser>(
       type: Date,
       default: Date.now,
     },
+    blockedUsers: {
+      type: [{ type: Schema.Types.ObjectId, ref: 'User' }],
+      default: [],
+    },
     settings: {
       density: {
         type: String,
@@ -93,6 +125,23 @@ const userSchema = new Schema<IUser>(
       typingIndicators: { type: Boolean, default: true },
       autoDownloadMedia: { type: Boolean, default: true },
       language: { type: String, default: 'en' },
+      privacy: {
+        lastSeen: { type: String, enum: PRIVACY_ENUM, default: 'everyone' },
+        onlineStatus: { type: String, enum: PRIVACY_ENUM, default: 'everyone' },
+        profilePhoto: { type: String, enum: PRIVACY_ENUM, default: 'everyone' },
+        about: { type: String, enum: PRIVACY_ENUM, default: 'everyone' },
+        readReceipts: { type: Boolean, default: true },
+      },
+      notifications: {
+        privateMessages: { type: Boolean, default: true },
+        groupMessages: { type: Boolean, default: true },
+        communityMessages: { type: Boolean, default: true },
+        communityActivity: { type: Boolean, default: true },
+        soundEnabled: { type: Boolean, default: true },
+        soundTone: { type: String, enum: SOUND_TONE_ENUM, default: 'chime' },
+        messagePreview: { type: Boolean, default: true },
+        vibrationEnabled: { type: Boolean, default: true },
+      },
     },
   },
   { timestamps: true }

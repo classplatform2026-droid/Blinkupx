@@ -1,11 +1,15 @@
 import { useState } from 'react';
 import {
+  Ban,
+  Bell,
+  ChevronRight,
   Database,
   Globe,
   HelpCircle,
   Info,
   MessageSquare,
   Palette,
+  Shield,
 } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 import { AppHeader } from '../../components/AppHeader';
@@ -68,6 +72,66 @@ export function AppSettingsPage() {
 
       <div className="flex-1 overflow-y-auto px-4 sm:px-6 py-6">
         <div className="max-w-2xl mx-auto space-y-6">
+          {/* Privacy & Notifications Shortcuts */}
+          <section className="rounded-2xl bg-[#202020] border border-[#303030] divide-y divide-[#303030] overflow-hidden">
+            <button
+              type="button"
+              onClick={() => navigate('/profile/privacy')}
+              className="w-full flex items-center justify-between gap-4 px-5 py-4 hover:bg-[#242424] text-left cursor-pointer"
+            >
+              <div className="flex items-center gap-3">
+                <Shield className="w-4 h-4 text-[#999999]" />
+                <div>
+                  <p className="text-sm font-medium text-[#FFFFFF]">
+                    Privacy &amp; Security
+                  </p>
+                  <p className="text-xs text-[#999999]">
+                    Last seen, online status, profile photo, about &amp; read receipts
+                  </p>
+                </div>
+              </div>
+              <ChevronRight className="w-4 h-4 text-[#999999]" />
+            </button>
+
+            <button
+              type="button"
+              onClick={() => navigate('/profile/blocked')}
+              className="w-full flex items-center justify-between gap-4 px-5 py-4 hover:bg-[#242424] text-left cursor-pointer"
+            >
+              <div className="flex items-center gap-3">
+                <Ban className="w-4 h-4 text-[#999999]" />
+                <div>
+                  <p className="text-sm font-medium text-[#FFFFFF]">
+                    Blocked Contacts
+                  </p>
+                  <p className="text-xs text-[#999999]">
+                    View and manage blocked users
+                  </p>
+                </div>
+              </div>
+              <ChevronRight className="w-4 h-4 text-[#999999]" />
+            </button>
+
+            <button
+              type="button"
+              onClick={() => navigate('/profile/notifications')}
+              className="w-full flex items-center justify-between gap-4 px-5 py-4 hover:bg-[#242424] text-left cursor-pointer"
+            >
+              <div className="flex items-center gap-3">
+                <Bell className="w-4 h-4 text-[#999999]" />
+                <div>
+                  <p className="text-sm font-medium text-[#FFFFFF]">
+                    Notifications
+                  </p>
+                  <p className="text-xs text-[#999999]">
+                    Categories, sound tones, message previews &amp; vibration
+                  </p>
+                </div>
+              </div>
+              <ChevronRight className="w-4 h-4 text-[#999999]" />
+            </button>
+          </section>
+
           {/* Appearance */}
           <section className="rounded-2xl bg-[#202020] border border-[#303030] p-5 space-y-4">
             <div className="flex items-center gap-2.5">
@@ -269,7 +333,7 @@ export function AppSettingsPage() {
                   About BlinkUpZ
                 </span>
               </div>
-              <span className="text-xs font-mono text-[#999999]">V1.0</span>
+              <span className="text-xs font-mono text-[#999999]">V1.3</span>
             </button>
           </section>
         </div>

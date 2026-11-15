@@ -184,35 +184,48 @@ export function NewChatPage() {
               }
             />
           ) : (
-            users.map((u) => (
-              <div
-                key={u.id}
-                className="flex items-center justify-between gap-3 px-3 py-2.5 rounded-xl hover:bg-[#202020] transition-colors"
-              >
-                <div className="flex items-center gap-3 min-w-0">
-                  <UserAvatar
-                    src={u.avatar}
-                    name={u.fullName}
-                    size="md"
-                    online={u.onlineStatus}
-                  />
-                  <div className="min-w-0">
-                    <p className="text-sm font-semibold text-[#FFFFFF] truncate">
-                      {u.fullName}
-                    </p>
-                    <p className="text-xs text-[#999999] truncate">@{u.username}</p>
-                  </div>
-                </div>
-                <PrimaryButton
-                  variant="secondary"
-                  loading={startingId === u.id}
-                  onClick={() => handleStartDirect(u)}
-                  className="min-h-[38px] px-3.5 py-1.5 text-xs"
+            users.map((u) => {
+              const isBlocked = Boolean(u.isBlockedByMe || u.hasBlockedMe);
+              return (
+                <div
+                  key={u.id}
+                  className="flex items-center justify-between gap-3 px-3 py-2.5 rounded-xl hover:bg-[#202020] transition-colors"
                 >
-                  Message
-                </PrimaryButton>
-              </div>
-            ))
+                  <div className="flex items-center gap-3 min-w-0">
+                    <UserAvatar
+                      src={u.avatar}
+                      name={u.fullName}
+                      size="md"
+                      online={!isBlocked && u.onlineStatus}
+                    />
+                    <div className="min-w-0">
+                      <p className="text-sm font-semibold text-[#FFFFFF] truncate">
+                        {u.fullName}
+                      </p>
+                      <p className="text-xs text-[#999999] truncate">@{u.username}</p>
+                    </div>
+                  </div>
+                  {isBlocked ? (
+                    <PrimaryButton
+                      variant="secondary"
+                      onClick={() => navigate(`/u/${u.username}`)}
+                      className="min-h-[38px] px-3.5 py-1.5 text-xs text-[#E5484D]"
+                    >
+                      {u.isBlockedByMe ? 'Blocked' : 'Unavailable'}
+                    </PrimaryButton>
+                  ) : (
+                    <PrimaryButton
+                      variant="secondary"
+                      loading={startingId === u.id}
+                      onClick={() => handleStartDirect(u)}
+                      className="min-h-[38px] px-3.5 py-1.5 text-xs"
+                    >
+                      Message
+                    </PrimaryButton>
+                  )}
+                </div>
+              );
+            })
           )}
         </div>
       </div>
@@ -243,12 +256,14 @@ export function NewChatPage() {
               Select Members ({selectedIds.length} selected)
             </p>
             <div className="max-h-56 overflow-y-auto space-y-1 border border-[#303030] rounded-xl p-2 bg-[#181818]">
-              {users.length === 0 ? (
+              {users.filter((u) => !u.isBlockedByMe && !u.hasBlockedMe).length === 0 ? (
                 <p className="text-xs text-[#999999] text-center py-4">
                   No other users available yet.
                 </p>
               ) : (
-                users.map((u) => {
+                users
+                  .filter((u) => !u.isBlockedByMe && !u.hasBlockedMe)
+                  .map((u) => {
                   const selected = selectedIds.includes(u.id);
                   return (
                     <button

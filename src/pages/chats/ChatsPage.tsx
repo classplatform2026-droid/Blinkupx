@@ -61,6 +61,7 @@ export function ChatsPage() {
     socket.on('message:read', refresh);
     socket.on('conversation:activity', refresh);
     socket.on('conversation:new', refresh);
+    window.addEventListener('blinkupz:relationship-updated', refresh);
 
     return () => {
       socket.off('message:new', refresh);
@@ -69,6 +70,7 @@ export function ChatsPage() {
       socket.off('message:read', refresh);
       socket.off('conversation:activity', refresh);
       socket.off('conversation:new', refresh);
+      window.removeEventListener('blinkupz:relationship-updated', refresh);
     };
   }, [socket, loadConversations]);
 
@@ -116,6 +118,7 @@ export function ChatsPage() {
 
   const getOnlineStatus = (conv: Conversation): boolean => {
     if (conv.type !== 'direct') return false;
+    if (conv.isBlockedByMe || conv.hasBlockedMe) return false;
     const peer = conv.participants.find((p) => p.userId !== user?.id);
     if (peer && presenceMap[peer.userId] !== undefined) {
       return presenceMap[peer.userId].onlineStatus;

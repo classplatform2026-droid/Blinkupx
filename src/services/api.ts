@@ -13,6 +13,8 @@ import type {
   ServiceStatus,
   SharedMediaResponse,
   User,
+  UserNotificationSettings,
+  UserPrivacySettings,
   UserSettings,
 } from '../types';
 
@@ -244,6 +246,40 @@ export const userApi = {
       '/users/profile',
       payload
     );
+    return res.data;
+  },
+  updatePrivacy: async (payload: Partial<UserPrivacySettings>) => {
+    const res = await api.patch<{ success: boolean; data: User; message: string }>(
+      '/users/privacy',
+      payload
+    );
+    return res.data;
+  },
+  updateNotifications: async (payload: Partial<UserNotificationSettings>) => {
+    const res = await api.patch<{ success: boolean; data: User; message: string }>(
+      '/users/notifications',
+      payload
+    );
+    return res.data;
+  },
+  getBlockedUsers: async () => {
+    const res = await api.get<{ success: boolean; data: User[] }>('/users/blocked');
+    return res.data.data;
+  },
+  blockUser: async (userId: string) => {
+    const res = await api.post<{
+      success: boolean;
+      message: string;
+      data: { user: User | null; blockedUser: User };
+    }>(`/users/block/${encodeURIComponent(userId)}`);
+    return res.data;
+  },
+  unblockUser: async (userId: string) => {
+    const res = await api.delete<{
+      success: boolean;
+      message: string;
+      data: { user: User | null };
+    }>(`/users/block/${encodeURIComponent(userId)}`);
     return res.data;
   },
 };

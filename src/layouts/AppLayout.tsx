@@ -10,8 +10,7 @@ export function AppLayout({ children }: { children: React.ReactNode }) {
   const isDetailScreen =
     /^\/chats\/[^/]+$/.test(location.pathname) ||
     /^\/community\/[^/]+(\/.*)?$/.test(location.pathname) ||
-    location.pathname === '/profile/edit' ||
-    location.pathname === '/profile/settings';
+    /^\/profile\/.+$/.test(location.pathname);
 
   return (
     <div className="h-dvh w-full flex bg-[#181818] text-[#FFFFFF] overflow-hidden">

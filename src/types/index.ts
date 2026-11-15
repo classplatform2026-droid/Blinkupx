@@ -1,3 +1,25 @@
+export type PrivacyVisibility = 'everyone' | 'contacts' | 'nobody';
+export type NotificationSoundTone = 'chime' | 'ping' | 'pop' | 'soft';
+
+export interface UserPrivacySettings {
+  lastSeen: PrivacyVisibility;
+  onlineStatus: PrivacyVisibility;
+  profilePhoto: PrivacyVisibility;
+  about: PrivacyVisibility;
+  readReceipts: boolean;
+}
+
+export interface UserNotificationSettings {
+  privateMessages: boolean;
+  groupMessages: boolean;
+  communityMessages: boolean;
+  communityActivity: boolean;
+  soundEnabled: boolean;
+  soundTone: NotificationSoundTone;
+  messagePreview: boolean;
+  vibrationEnabled: boolean;
+}
+
 export interface UserSettings {
   density: 'comfortable' | 'compact';
   enterToSend: boolean;
@@ -5,6 +27,15 @@ export interface UserSettings {
   typingIndicators: boolean;
   autoDownloadMedia: boolean;
   language: string;
+  privacy?: UserPrivacySettings;
+  notifications?: UserNotificationSettings;
+}
+
+export interface PrivacyStatusFlags {
+  lastSeenHidden: boolean;
+  onlineHidden: boolean;
+  avatarHidden: boolean;
+  aboutHidden: boolean;
 }
 
 export interface User {
@@ -18,6 +49,10 @@ export interface User {
   isVerified?: boolean;
   onlineStatus: boolean;
   lastSeen: string | null;
+  blockedUsers?: string[];
+  isBlockedByMe?: boolean;
+  hasBlockedMe?: boolean;
+  privacyStatus?: PrivacyStatusFlags;
   settings?: UserSettings;
   createdAt?: string;
 }
@@ -46,6 +81,9 @@ export interface Conversation {
   avatar: string;
   onlineStatus: boolean;
   lastSeen: string | null;
+  isBlockedByMe?: boolean;
+  hasBlockedMe?: boolean;
+  peerPrivacy?: PrivacyStatusFlags | null;
   communityId: string | null;
   participants: ConversationParticipant[];
   lastMessage: {

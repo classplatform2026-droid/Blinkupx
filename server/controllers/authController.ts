@@ -8,6 +8,7 @@ import {
   type AuthenticatedRequest,
 } from '../middleware/auth.ts';
 import { issueOtp, normalizePhone, verifyOtpCode } from '../services/otpService.ts';
+import { emitPresenceToAuthorizedViewers } from '../sockets/index.ts';
 import { AppError } from '../utils/errors.ts';
 import { serializeUser } from '../utils/serializers.ts';
 import {
@@ -247,6 +248,7 @@ export async function logout(req: AuthenticatedRequest, res: Response) {
       onlineStatus: false,
       lastSeen: new Date(),
     });
+    await emitPresenceToAuthorizedViewers(req.userId);
   }
   clearAuthCookie(req, res);
   res.json({ success: true, message: 'Logged out.' });

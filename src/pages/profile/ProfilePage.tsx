@@ -1,5 +1,15 @@
 import { useState } from 'react';
-import { ChevronRight, Edit3, LogOut, QrCode, ScanLine, Settings } from 'lucide-react';
+import {
+  Ban,
+  Bell,
+  ChevronRight,
+  Edit3,
+  LogOut,
+  QrCode,
+  ScanLine,
+  Settings,
+  Shield,
+} from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 import { AppHeader } from '../../components/AppHeader';
 import { PrimaryButton } from '../../components/PrimaryButton';
@@ -128,6 +138,70 @@ export function ProfilePage() {
                   <p className="text-sm font-medium text-[#FFFFFF]">Edit Profile</p>
                   <p className="text-xs text-[#999999]">
                     Update photo, display name, username, and bio
+                  </p>
+                </div>
+              </div>
+              <ChevronRight className="w-4 h-4 text-[#999999]" />
+            </button>
+
+            <button
+              type="button"
+              onClick={() => navigate('/profile/privacy')}
+              className="w-full flex items-center justify-between gap-4 px-5 py-4 hover:bg-[#242424] transition-colors text-left cursor-pointer"
+            >
+              <div className="flex items-center gap-3.5">
+                <Shield className="w-5 h-5 text-[#999999]" />
+                <div>
+                  <p className="text-sm font-medium text-[#FFFFFF]">
+                    Privacy &amp; Security
+                  </p>
+                  <p className="text-xs text-[#999999]">
+                    Last seen, online status, profile photo, about &amp; read receipts
+                  </p>
+                </div>
+              </div>
+              <ChevronRight className="w-4 h-4 text-[#999999]" />
+            </button>
+
+            <button
+              type="button"
+              onClick={() => navigate('/profile/blocked')}
+              className="w-full flex items-center justify-between gap-4 px-5 py-4 hover:bg-[#242424] transition-colors text-left cursor-pointer"
+            >
+              <div className="flex items-center gap-3.5">
+                <Ban className="w-5 h-5 text-[#999999]" />
+                <div>
+                  <p className="text-sm font-medium text-[#FFFFFF]">
+                    Blocked Contacts
+                  </p>
+                  <p className="text-xs text-[#999999]">
+                    Manage blocked users and messaging restrictions
+                  </p>
+                </div>
+              </div>
+              <div className="flex items-center gap-2">
+                {(user.blockedUsers?.length || 0) > 0 && (
+                  <span className="text-xs font-mono text-[#999999]">
+                    {user.blockedUsers!.length}
+                  </span>
+                )}
+                <ChevronRight className="w-4 h-4 text-[#999999]" />
+              </div>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => navigate('/profile/notifications')}
+              className="w-full flex items-center justify-between gap-4 px-5 py-4 hover:bg-[#242424] transition-colors text-left cursor-pointer"
+            >
+              <div className="flex items-center gap-3.5">
+                <Bell className="w-5 h-5 text-[#999999]" />
+                <div>
+                  <p className="text-sm font-medium text-[#FFFFFF]">
+                    Notifications
+                  </p>
+                  <p className="text-xs text-[#999999]">
+                    Message alerts, community activity, sound, vibration &amp; previews
                   </p>
                 </div>
               </div>
