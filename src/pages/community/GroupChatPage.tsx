@@ -1,17 +1,18 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ArrowLeft,
-  Check,
   Images,
+  Info,
   LogOut,
   MoreVertical,
   Pin,
   Search,
+  Settings,
   Shield,
   Users,
   X,
 } from 'lucide-react';
-import { useNavigate, useParams } from 'react-router-dom';
+import { useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { DropdownMenu } from '../../components/DropdownMenu';
 import { MessageBubble } from '../../components/MessageBubble';
 import { MessageInput } from '../../components/MessageInput';
@@ -39,6 +40,8 @@ import { formatDateSeparator } from '../../utils/formatters';
 
 export function GroupChatPage() {
   const { communityId } = useParams<{ communityId: string }>();
+  const [searchParams] = useSearchParams();
+  const highlightId = searchParams.get('highlight');
   const navigate = useNavigate();
   const { user } = useAuth();
   const { socket, typingMap } = useSocket();
@@ -57,11 +60,13 @@ export function GroupChatPage() {
   const [forwardTargets, setForwardTargets] = useState<Conversation[]>([]);
   const [previewImage, setPreviewImage] = useState<string | null>(null);
 
-  const [membersModalOpen, setMembersModalOpen] = useState(false);
+  const [leaveConfirmOpen, setLeaveConfirmOpen] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [sharedMediaOpen, setSharedMediaOpen] = useState(false);
   const [jumpedMessageId, setJumpedMessageId] = useState<string | null>(null);
+  const [pendingScrollId, setPendingScrollId] = useState<string | null>(null);
+  const [hasNewerMessages, setHasNewerMessages] = useState(false);
 
   const bottomRef = useRef<HTMLDivElement>(null);
 
@@ -74,13 +79,20 @@ export function GroupChatPage() {
       setCommunity(commData);
 
       if (commData.isMember && commData.conversationId) {
-        const [convData, msgData] = await Promise.all([
-          conversationApi.getById(commData.conversationId),
-          messageApi.list(commData.conversationId),
-        ]);
+        const convData = await conversationApi.getById(commData.conversationId);
+        const msgData = highlightId
+          ? await messageApi
+              .getAround(commData.conversationId, highlightId)
+              .catch(() => messageApi.list(commData.conversationId!))
+          : await messageApi.list(commData.conversationId);
         setConversation(convData);
         setMessages(msgData.messages);
         setHasMore(msgData.hasMore);
+        setHasNewerMessages(Boolean('hasNewer' in msgData && msgData.hasNewer));
+        if (highlightId) {
+          setPendingScrollId(highlightId);
+          setJumpedMessageId(highlightId);
+        }
 
         socket?.emit('group:join', { conversationId: commData.conversationId });
         socket?.emit('message:read', { conversationId: commData.conversationId });
@@ -90,17 +102,28 @@ export function GroupChatPage() {
     } finally {
       setLoading(false);
     }
-  }, [communityId, socket]);
+  }, [communityId, highlightId, socket]);
 
   useEffect(() => {
     loadGroupChat();
   }, [loadGroupChat]);
 
   useEffect(() => {
-    if (!loading) {
+    if (loading) return;
+    if (pendingScrollId) {
+      const el = document.getElementById(`msg-${pendingScrollId}`);
+      if (el) {
+        el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        setPendingScrollId(null);
+      }
+    }
+  }, [loading, messages, pendingScrollId]);
+
+  useEffect(() => {
+    if (!loading && !highlightId && !hasNewerMessages) {
       bottomRef.current?.scrollIntoView({ behavior: 'auto' });
     }
-  }, [loading]);
+  }, [loading, highlightId, hasNewerMessages]);
 
   const convId = community?.conversationId || '';
 
@@ -109,13 +132,15 @@ export function GroupChatPage() {
 
     const onNewMessage = (msg: Message) => {
       if (msg.conversationId !== convId) return;
-      setMessages((prev) =>
-        prev.some((m) => m.id === msg.id) ? prev : [...prev, msg]
-      );
+      if (!hasNewerMessages) {
+        setMessages((prev) =>
+          prev.some((m) => m.id === msg.id) ? prev : [...prev, msg]
+        );
+        setTimeout(() => bottomRef.current?.scrollIntoView({ behavior: 'smooth' }), 40);
+      }
       if (msg.senderId !== user?.id) {
         socket.emit('message:read', { conversationId: convId });
       }
-      setTimeout(() => bottomRef.current?.scrollIntoView({ behavior: 'smooth' }), 40);
     };
 
     const onEditMessage = (updated: Message) => {
@@ -171,6 +196,18 @@ export function GroupChatPage() {
       loadGroupChat();
     };
 
+    const onCommunityUpdated = (payload: { communityId?: string }) => {
+      if (payload?.communityId === communityId) {
+        loadGroupChat();
+      }
+    };
+
+    const onCommunityDeleted = (payload: { communityId?: string }) => {
+      if (payload?.communityId === communityId) {
+        navigate('/community', { replace: true });
+      }
+    };
+
     socket.on('message:new', onNewMessage);
     socket.on('message:edit', onEditMessage);
     socket.on('message:delete', onDeleteMessage);
@@ -179,6 +216,9 @@ export function GroupChatPage() {
     socket.on('conversation:updated', onConvUpdated);
     socket.on('group:join', onMemberChange);
     socket.on('group:leave', onMemberChange);
+    socket.on('community:updated', onCommunityUpdated);
+    socket.on('community:deleted', onCommunityDeleted);
+    socket.on('community:removed', onCommunityDeleted);
 
     return () => {
       socket.off('message:new', onNewMessage);
@@ -189,8 +229,11 @@ export function GroupChatPage() {
       socket.off('conversation:updated', onConvUpdated);
       socket.off('group:join', onMemberChange);
       socket.off('group:leave', onMemberChange);
+      socket.off('community:updated', onCommunityUpdated);
+      socket.off('community:deleted', onCommunityDeleted);
+      socket.off('community:removed', onCommunityDeleted);
     };
-  }, [socket, convId, user?.id, loadGroupChat]);
+  }, [socket, convId, user?.id, loadGroupChat, communityId, navigate, hasNewerMessages]);
 
   const handleLeaveCommunity = async () => {
     if (!community) return;
@@ -212,19 +255,13 @@ export function GroupChatPage() {
     setSearchOpen(false);
     setSearchQuery('');
 
-    const scrollToTarget = () => {
-      setJumpedMessageId(messageId);
-      requestAnimationFrame(() => {
-        const el = document.getElementById(`msg-${messageId}`);
-        el?.scrollIntoView({ behavior: 'smooth', block: 'center' });
-      });
-      setTimeout(() => {
-        setJumpedMessageId((curr) => (curr === messageId ? null : curr));
-      }, 2600);
-    };
+    setJumpedMessageId(messageId);
+    setTimeout(() => {
+      setJumpedMessageId((curr) => (curr === messageId ? null : curr));
+    }, 2600);
 
     if (messages.some((m) => m.id === messageId)) {
-      scrollToTarget();
+      setPendingScrollId(messageId);
       return;
     }
 
@@ -232,7 +269,23 @@ export function GroupChatPage() {
       const around = await messageApi.getAround(convId, messageId);
       setMessages(around.messages);
       setHasMore(around.hasMore);
-      setTimeout(scrollToTarget, 60);
+      setHasNewerMessages(Boolean(around.hasNewer));
+      setPendingScrollId(messageId);
+    } catch (err) {
+      showToast(extractApiError(err).message, 'error');
+    }
+  };
+
+  const handleBackToLatest = async () => {
+    if (!convId) return;
+    try {
+      const latest = await messageApi.list(convId);
+      setMessages(latest.messages);
+      setHasMore(latest.hasMore);
+      setHasNewerMessages(false);
+      setTimeout(() => {
+        bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
+      }, 40);
     } catch (err) {
       showToast(extractApiError(err).message, 'error');
     }
@@ -267,8 +320,8 @@ export function GroupChatPage() {
             community.description ||
             'Join this community to participate in real-time group discussions.'
           }
-          actionLabel={community.isPending ? 'Request Pending' : 'Back to Communities'}
-          onAction={() => navigate('/community')}
+          actionLabel="View Community Details"
+          onAction={() => navigate(`/community/${community.id}/details`)}
         />
       </div>
     );
@@ -282,6 +335,14 @@ export function GroupChatPage() {
   const canModerate = Boolean(
     community.myRole && ['owner', 'admin', 'moderator'].includes(community.myRole)
   );
+  const canPin = Boolean(
+    community.myRole &&
+      (community.settings?.whoCanPinMessages === 'admins'
+        ? ['owner', 'admin'].includes(community.myRole)
+        : ['owner', 'admin', 'moderator'].includes(community.myRole))
+  );
+  const canSend =
+    community.settings?.whoCanPost !== 'moderators_only' || canModerate;
   const isOwner = community.myRole === 'owner';
 
   const typingList = typingMap[convId] || [];
@@ -294,8 +355,8 @@ export function GroupChatPage() {
   return (
     <div className="flex-1 flex h-full bg-[#181818] overflow-hidden">
       <div className="flex-1 flex flex-col min-w-0 h-full bg-[#181818] overflow-hidden">
-      <header className="h-16 px-3 sm:px-5 flex items-center justify-between gap-3 border-b border-[#303030] shrink-0">
-        <div className="flex items-center gap-3 min-w-0">
+      <header className="h-16 px-3 sm:px-5 flex items-center justify-between gap-2 sm:gap-3 border-b border-[#303030] shrink-0">
+        <div className="flex items-center gap-2.5 sm:gap-3 min-w-0 flex-1">
           <button
             type="button"
             onClick={() => navigate('/community')}
@@ -304,53 +365,30 @@ export function GroupChatPage() {
           >
             <ArrowLeft className="w-5 h-5" />
           </button>
-          <UserAvatar src={community.image} name={community.name} size="sm" />
-          <div className="min-w-0">
-            <h1 className="text-sm sm:text-base font-semibold text-[#FFFFFF] truncate">
-              {community.name}
-            </h1>
-            <p className="text-xs text-[#999999] font-mono tabular-nums truncate">
-              {typingList.length > 0 ? (
-                <span className="text-[#22C55E] font-sans">
-                  {typingList[0].username} is typing...
-                </span>
-              ) : (
-                `${community.memberCount} members · ${community.privacy}`
-              )}
-            </p>
-          </div>
+          <button
+            type="button"
+            onClick={() => navigate(`/community/${community.id}/details`)}
+            className="flex items-center gap-2.5 sm:gap-3 min-w-0 flex-1 text-left cursor-pointer hover:opacity-90 transition-opacity"
+          >
+            <UserAvatar src={community.image} name={community.name} size="sm" />
+            <div className="min-w-0 flex-1">
+              <h1 className="text-sm sm:text-base font-semibold text-[#FFFFFF] truncate">
+                {community.name}
+              </h1>
+              <p className="text-xs text-[#999999] font-mono tabular-nums truncate">
+                {typingList.length > 0 ? (
+                  <span className="text-[#22C55E] font-sans">
+                    {typingList[0].username} is typing...
+                  </span>
+                ) : (
+                  `${community.memberCount} members · ${community.privacy}`
+                )}
+              </p>
+            </div>
+          </button>
         </div>
 
         <div className="flex items-center gap-1 shrink-0">
-          <button
-            type="button"
-            onClick={() => setSharedMediaOpen((p) => !p)}
-            aria-label="Shared Media"
-            title="Shared Media"
-            className={`min-w-[40px] min-h-[40px] rounded-xl flex items-center justify-center cursor-pointer transition-colors ${
-              sharedMediaOpen
-                ? 'bg-[#242424] text-[#FFFFFF]'
-                : 'text-[#999999] hover:text-white hover:bg-[#242424]'
-            }`}
-          >
-            <Images className="w-4 h-4" />
-          </button>
-          <button
-            type="button"
-            onClick={() => setSearchOpen((p) => !p)}
-            aria-label="Search group messages"
-            className="min-w-[40px] min-h-[40px] rounded-xl flex items-center justify-center text-[#999999] hover:text-white hover:bg-[#242424] cursor-pointer"
-          >
-            <Search className="w-4 h-4" />
-          </button>
-          <button
-            type="button"
-            onClick={() => setMembersModalOpen(true)}
-            aria-label="Community members"
-            className="min-w-[40px] min-h-[40px] rounded-xl flex items-center justify-center text-[#999999] hover:text-white hover:bg-[#242424] cursor-pointer"
-          >
-            <Users className="w-4 h-4" />
-          </button>
           <DropdownMenu
             trigger={
               <button
@@ -363,14 +401,36 @@ export function GroupChatPage() {
             }
             options={[
               {
-                label: 'Shared media',
-                icon: <Images className="w-4 h-4" />,
-                onClick: () => setSharedMediaOpen(true),
+                label: 'Community details',
+                icon: <Info className="w-4 h-4" />,
+                onClick: () => navigate(`/community/${community.id}/details`),
               },
               {
                 label: 'Members & Roles',
                 icon: <Shield className="w-4 h-4" />,
-                onClick: () => setMembersModalOpen(true),
+                onClick: () => navigate(`/community/${community.id}/members`),
+              },
+              ...(community.permissions?.canManageSettings
+                ? [
+                    {
+                      label: 'Community settings',
+                      icon: <Settings className="w-4 h-4" />,
+                      onClick: () => navigate(`/community/${community.id}/settings`),
+                    },
+                  ]
+                : []),
+              {
+                label: searchOpen ? 'Close search' : 'Search messages',
+                icon: <Search className="w-4 h-4" />,
+                onClick: () => {
+                  setSearchOpen((p) => !p);
+                  setSearchQuery('');
+                },
+              },
+              {
+                label: sharedMediaOpen ? 'Close shared media' : 'Shared media',
+                icon: <Images className="w-4 h-4" />,
+                onClick: () => setSharedMediaOpen((p) => !p),
               },
               ...(!isOwner
                 ? [
@@ -378,7 +438,7 @@ export function GroupChatPage() {
                       label: 'Leave community',
                       icon: <LogOut className="w-4 h-4" />,
                       danger: true,
-                      onClick: handleLeaveCommunity,
+                      onClick: () => setLeaveConfirmOpen(true),
                     },
                   ]
                 : []),
@@ -422,7 +482,7 @@ export function GroupChatPage() {
               </p>
             </div>
           </div>
-          {canModerate && (
+          {canPin && (
             <button
               type="button"
               onClick={async () => {
@@ -498,6 +558,11 @@ export function GroupChatPage() {
                   if (scope === 'me') {
                     setMessages((prev) => prev.filter((item) => item.id !== m.id));
                   }
+                  window.dispatchEvent(
+                    new CustomEvent('blinkupz:shared-media-refresh', {
+                      detail: { conversationId: convId },
+                    })
+                  );
                 }}
                 onReact={async (m, emoji) => {
                   const res = await messageApi.toggleReaction(m.id, emoji);
@@ -508,7 +573,7 @@ export function GroupChatPage() {
                   );
                 }}
                 onPin={
-                  canModerate
+                  canPin
                     ? async (m) => {
                         const next = await conversationApi.updateMeta(
                           convId,
@@ -529,140 +594,105 @@ export function GroupChatPage() {
             </React.Fragment>
           );
         })}
+        {hasNewerMessages && (
+          <div className="flex justify-center pt-3">
+            <PrimaryButton
+              variant="secondary"
+              onClick={handleBackToLatest}
+              className="text-xs min-h-[36px] py-1.5 px-3.5"
+            >
+              Back to latest messages
+            </PrimaryButton>
+          </div>
+        )}
         <div ref={bottomRef} />
       </div>
 
-      <MessageInput
-        enterToSend={user?.settings?.enterToSend ?? true}
-        replyingTo={replyingTo}
-        editingMessage={editingMessage}
-        onCancelReply={() => setReplyingTo(null)}
-        onCancelEdit={() => setEditingMessage(null)}
-        onTypingStart={() => socket?.emit('typing:start', { conversationId: convId })}
-        onTypingStop={() => socket?.emit('typing:stop', { conversationId: convId })}
-        onSendMessage={async (payload: {
-          content?: string;
-          messageType: 'text' | 'image' | 'video' | 'document' | 'voice';
-          attachments?: MessageAttachment[];
-        }) => {
-          const created = await messageApi.send({
-            conversationId: convId,
-            content: payload.content,
-            messageType: payload.messageType,
-            attachments: payload.attachments,
-            replyTo: replyingTo?.id || null,
-          });
-          setReplyingTo(null);
-          setMessages((prev) =>
-            prev.some((m) => m.id === created.id) ? prev : [...prev, created]
-          );
-          setTimeout(() => bottomRef.current?.scrollIntoView({ behavior: 'smooth' }), 30);
-        }}
-        onSaveEdit={async (id, content) => {
-          const updated = await messageApi.edit(id, content);
-          setEditingMessage(null);
-          setMessages((prev) => prev.map((m) => (m.id === updated.id ? updated : m)));
-        }}
-      />
+      {canSend ? (
+        <MessageInput
+          enterToSend={user?.settings?.enterToSend ?? true}
+          replyingTo={replyingTo}
+          editingMessage={editingMessage}
+          onCancelReply={() => setReplyingTo(null)}
+          onCancelEdit={() => setEditingMessage(null)}
+          onTypingStart={() => socket?.emit('typing:start', { conversationId: convId })}
+          onTypingStop={() => socket?.emit('typing:stop', { conversationId: convId })}
+          onSendMessage={async (payload: {
+            content?: string;
+            messageType: 'text' | 'image' | 'video' | 'document' | 'voice';
+            attachments?: MessageAttachment[];
+          }) => {
+            const created = await messageApi.send({
+              conversationId: convId,
+              content: payload.content,
+              messageType: payload.messageType,
+              attachments: payload.attachments,
+              replyTo: replyingTo?.id || null,
+            });
+            setReplyingTo(null);
+            if (hasNewerMessages) {
+              const latest = await messageApi.list(convId);
+              setMessages(latest.messages);
+              setHasMore(latest.hasMore);
+              setHasNewerMessages(false);
+            } else {
+              setMessages((prev) =>
+                prev.some((m) => m.id === created.id) ? prev : [...prev, created]
+              );
+            }
+            window.dispatchEvent(
+              new CustomEvent('blinkupz:shared-media-refresh', {
+                detail: { conversationId: convId },
+              })
+            );
+            setTimeout(() => bottomRef.current?.scrollIntoView({ behavior: 'smooth' }), 30);
+          }}
+          onSaveEdit={async (id, content) => {
+            const updated = await messageApi.edit(id, content);
+            setEditingMessage(null);
+            setMessages((prev) => prev.map((m) => (m.id === updated.id ? updated : m)));
+            window.dispatchEvent(
+              new CustomEvent('blinkupz:shared-media-refresh', {
+                detail: { conversationId: convId },
+              })
+            );
+          }}
+        />
+      ) : (
+        <div className="px-4 py-3.5 border-t border-[#303030] bg-[#202020] text-center text-xs text-[#999999] shrink-0">
+          Only moderators, admins, and the owner can send messages in this community.
+        </div>
+      )}
 
-      {/* Members & Roles Modal */}
+      {/* Leave Community Confirmation Modal */}
       <Modal
-        open={membersModalOpen}
-        onClose={() => setMembersModalOpen(false)}
-        title={`${community.name} Members (${community.memberCount})`}
+        open={leaveConfirmOpen}
+        onClose={() => setLeaveConfirmOpen(false)}
+        title="Leave Community"
       >
-        <div className="space-y-5">
-          {community.pendingRequests.length > 0 && (
-            <div className="space-y-2 pb-4 border-b border-[#303030]">
-              <h3 className="text-xs font-semibold text-[#999999]">
-                Pending Join Requests ({community.pendingRequests.length})
-              </h3>
-              {community.pendingRequests.map((reqUser) => (
-                <div
-                  key={reqUser.id}
-                  className="flex items-center justify-between gap-3 py-1.5"
-                >
-                  <div className="flex items-center gap-2.5 min-w-0">
-                    <UserAvatar src={reqUser.avatar} name={reqUser.fullName} size="sm" />
-                    <div className="min-w-0">
-                      <p className="text-sm text-[#FFFFFF] truncate">{reqUser.fullName}</p>
-                      <p className="text-xs text-[#999999] truncate">@{reqUser.username}</p>
-                    </div>
-                  </div>
-                  <div className="flex items-center gap-1.5 shrink-0">
-                    <button
-                      type="button"
-                      onClick={async () => {
-                        await communityApi.handleRequest(community.id, reqUser.id, 'approve');
-                        loadGroupChat();
-                      }}
-                      className="w-8 h-8 rounded-lg bg-[#22C55E] text-[#181818] flex items-center justify-center cursor-pointer"
-                      aria-label="Approve"
-                    >
-                      <Check className="w-4 h-4" />
-                    </button>
-                    <button
-                      type="button"
-                      onClick={async () => {
-                        await communityApi.handleRequest(community.id, reqUser.id, 'reject');
-                        loadGroupChat();
-                      }}
-                      className="w-8 h-8 rounded-lg bg-[#242424] border border-[#303030] text-[#E5484D] flex items-center justify-center cursor-pointer"
-                      aria-label="Decline"
-                    >
-                      <X className="w-4 h-4" />
-                    </button>
-                  </div>
-                </div>
-              ))}
-            </div>
-          )}
-
-          <div className="space-y-2">
-            {community.members.map((m) => (
-              <div
-                key={m.user.id}
-                className="flex items-center justify-between gap-3 py-1.5"
-              >
-                <div className="flex items-center gap-2.5 min-w-0">
-                  <UserAvatar
-                    src={m.user.avatar}
-                    name={m.user.fullName}
-                    size="sm"
-                    online={m.user.onlineStatus}
-                  />
-                  <div className="min-w-0">
-                    <p className="text-sm font-medium text-[#FFFFFF] truncate">
-                      {m.user.fullName}
-                    </p>
-                    <p className="text-xs text-[#999999] truncate">
-                      @{m.user.username} · <span className="capitalize">{m.role}</span>
-                    </p>
-                  </div>
-                </div>
-
-                {isOwner && m.role !== 'owner' && (
-                  <select
-                    aria-label={`Role for ${m.user.fullName}`}
-                    value={m.role}
-                    onChange={async (e) => {
-                      await communityApi.updateRole(
-                        community.id,
-                        m.user.id,
-                        e.target.value as 'admin' | 'moderator' | 'member'
-                      );
-                      showToast('Member role updated.', 'success');
-                      loadGroupChat();
-                    }}
-                    className="h-8 rounded-lg bg-[#242424] border border-[#303030] px-2 text-xs text-[#FFFFFF]"
-                  >
-                    <option value="member">Member</option>
-                    <option value="moderator">Moderator</option>
-                    <option value="admin">Admin</option>
-                  </select>
-                )}
-              </div>
-            ))}
+        <div className="space-y-4">
+          <p className="text-sm text-[#999999] leading-relaxed">
+            Are you sure you want to leave <strong className="text-[#FFFFFF]">{community.name}</strong>?
+            {community.privacy === 'private'
+              ? ' Because this is a private community, you will need admin approval to rejoin.'
+              : ' You can rejoin anytime from Discover Communities.'}
+          </p>
+          <div className="flex justify-end gap-2">
+            <PrimaryButton
+              variant="secondary"
+              onClick={() => setLeaveConfirmOpen(false)}
+            >
+              Cancel
+            </PrimaryButton>
+            <PrimaryButton
+              variant="danger"
+              onClick={async () => {
+                setLeaveConfirmOpen(false);
+                await handleLeaveCommunity();
+              }}
+            >
+              Leave Community
+            </PrimaryButton>
           </div>
         </div>
       </Modal>

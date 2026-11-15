@@ -2,6 +2,7 @@ import React, { createContext, useContext, useEffect, useRef, useState } from 'r
 import { io, type Socket } from 'socket.io-client';
 import { getStoredAuthToken } from '../services/api';
 import { useAuth } from './AuthContext';
+import { useToast } from './ToastContext';
 
 interface PresenceEntry {
   onlineStatus: boolean;
@@ -24,6 +25,7 @@ const SocketContext = createContext<SocketContextValue>({
 
 export function SocketProvider({ children }: { children: React.ReactNode }) {
   const { user } = useAuth();
+  const { showToast } = useToast();
   const [socket, setSocket] = useState<Socket | null>(null);
   const [connected, setConnected] = useState(false);
   const [presenceMap, setPresenceMap] = useState<Record<string, PresenceEntry>>({});
@@ -116,6 +118,54 @@ export function SocketProvider({ children }: { children: React.ReactNode }) {
       }));
     });
 
+    s.on(
+      'community:join_request',
+      (payload: {
+        communityId: string;
+        communityName: string;
+        requester: { fullName: string; username: string };
+      }) => {
+        showToast(
+          `${payload.requester.fullName} requested to join ${payload.communityName}.`,
+          'info'
+        );
+      }
+    );
+
+    s.on(
+      'community:request_resolved',
+      (payload: {
+        communityId: string;
+        communityName: string;
+        decision: 'approve' | 'reject';
+      }) => {
+        showToast(
+          payload.decision === 'approve'
+            ? `Your request to join ${payload.communityName} was approved.`
+            : `Your request to join ${payload.communityName} was declined.`,
+          payload.decision === 'approve' ? 'success' : 'info'
+        );
+      }
+    );
+
+    s.on(
+      'community:invited',
+      (payload: { communityName: string; invitedBy: string }) => {
+        showToast(
+          `${payload.invitedBy} added you to ${payload.communityName}.`,
+          'success'
+        );
+      }
+    );
+
+    s.on('community:removed', (payload: { communityName: string }) => {
+      showToast(`You were removed from ${payload.communityName}.`, 'info');
+    });
+
+    s.on('community:deleted', (payload: { communityName: string }) => {
+      showToast(`${payload.communityName} was deleted by the owner.`, 'info');
+    });
+
     setSocket(s);
 
     return () => {
@@ -125,7 +175,7 @@ export function SocketProvider({ children }: { children: React.ReactNode }) {
       setSocket(null);
       setConnected(false);
     };
-  }, [user?.id]);
+  }, [user?.id, showToast]);
 
   return (
     <SocketContext.Provider value={{ socket, connected, presenceMap, typingMap }}>

@@ -128,3 +128,37 @@ export const createCommunitySchema = z.object({
   image: z.string().trim().max(500).optional().default(''),
   privacy: z.enum(['public', 'private']).default('public'),
 });
+
+export const updateCommunitySettingsSchema = z.object({
+  name: z
+    .string()
+    .trim()
+    .min(3, 'Community name must be at least 3 characters')
+    .max(60)
+    .optional(),
+  description: z.string().trim().max(400).optional(),
+  image: z.string().trim().max(500).optional(),
+  privacy: z.enum(['public', 'private']).optional(),
+  settings: z
+    .object({
+      whoCanInvite: z
+        .enum(['owner_only', 'admins', 'moderators', 'all_members'])
+        .optional(),
+      whoCanPinMessages: z.enum(['admins', 'moderators']).optional(),
+      whoCanPost: z.enum(['all_members', 'moderators_only']).optional(),
+    })
+    .optional(),
+});
+
+export const inviteCommunityMembersSchema = z.object({
+  userIds: z.array(z.string().min(1)).min(1, 'Select at least one user to invite').max(30),
+});
+
+export const handleJoinRequestSchema = z.object({
+  targetUserId: z.string().min(1, 'Target user is required'),
+  decision: z.enum(['approve', 'reject']),
+});
+
+export const transferOwnershipSchema = z.object({
+  newOwnerId: z.string().min(1, 'New owner is required'),
+});

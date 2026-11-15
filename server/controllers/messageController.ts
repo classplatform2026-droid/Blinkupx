@@ -80,6 +80,10 @@ export async function listMessages(req: AuthenticatedRequest, res: Response) {
   const limit = Math.min(Number(req.query.limit || 40), 100);
   const before = req.query.before ? new Date(String(req.query.before)) : null;
 
+  if (!Types.ObjectId.isValid(conversationId)) {
+    throw new AppError('Invalid conversation identifier.', 400, 'INVALID_CONVERSATION_ID');
+  }
+
   const conv = await Conversation.findOne({
     _id: conversationId,
     'participants.userId': new Types.ObjectId(userId),
@@ -131,6 +135,20 @@ export async function sendMessage(req: AuthenticatedRequest, res: Response) {
     throw new AppError('Conversation not found or access denied.', 404, 'CONVERSATION_NOT_FOUND');
   }
 
+  if (conv.communityId) {
+    const community = await Community.findById(conv.communityId).select('members settings');
+    if (community?.settings?.whoCanPost === 'moderators_only') {
+      const member = community.members.find((m) => m.userId.toString() === userId);
+      if (!member || !['owner', 'admin', 'moderator'].includes(member.role)) {
+        throw new AppError(
+          'Only moderators, admins, and the owner can send messages in this community.',
+          403,
+          'POSTING_RESTRICTED'
+        );
+      }
+    }
+  }
+
   const hasText = parsed.content.trim().length > 0;
   const hasAttachments = parsed.attachments.length > 0;
   if (!hasText && !hasAttachments) {
@@ -146,10 +164,9 @@ export async function sendMessage(req: AuthenticatedRequest, res: Response) {
     .map((id) => new Types.ObjectId(id));
 
   const initialStatus = onlineRecipientIds.length > 0 ? 'delivered' : 'sent';
-  const links =
-    hasText && parsed.messageType === 'text'
-      ? await extractAndFetchLinkPreviews(parsed.content.trim())
-      : [];
+  const links = hasText
+    ? await extractAndFetchLinkPreviews(parsed.content.trim())
+    : [];
 
   const msg = await Message.create({
     conversationId: conv._id,
@@ -412,6 +429,10 @@ export async function getMessagesAround(req: AuthenticatedRequest, res: Response
   const userId = req.userId!;
   const { conversationId, messageId } = req.params;
 
+  if (!Types.ObjectId.isValid(conversationId) || !Types.ObjectId.isValid(messageId)) {
+    throw new AppError('Invalid conversation or message identifier.', 400, 'INVALID_ID');
+  }
+
   const conv = await Conversation.findOne({
     _id: conversationId,
     'participants.userId': new Types.ObjectId(userId),
@@ -446,7 +467,7 @@ export async function getMessagesAround(req: AuthenticatedRequest, res: Response
       }),
     Message.find({ ...baseFilter, createdAt: { $gt: target.createdAt } })
       .sort({ createdAt: 1 })
-      .limit(25)
+      .limit(26)
       .populate('senderId', 'fullName username avatar')
       .populate({
         path: 'replyTo',
@@ -459,13 +480,17 @@ export async function getMessagesAround(req: AuthenticatedRequest, res: Response
   const olderSlice = hasMore ? beforeDocs.slice(0, 25) : beforeDocs;
   olderSlice.reverse();
 
-  const combined = [...olderSlice, ...afterDocs];
+  const hasNewer = afterDocs.length > 25;
+  const newerSlice = hasNewer ? afterDocs.slice(0, 25) : afterDocs;
+
+  const combined = [...olderSlice, ...newerSlice];
 
   res.json({
     success: true,
     data: {
       messages: combined.map((m) => serializeMessage(m)),
       hasMore,
+      hasNewer,
     },
   });
 }

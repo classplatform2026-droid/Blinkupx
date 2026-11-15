@@ -2,6 +2,8 @@ import axios from 'axios';
 import type {
   CallHistoryItem,
   CommunityDetail,
+  CommunityMembersResponse,
+  CommunitySettings,
   CommunitySummary,
   Conversation,
   Message,
@@ -327,7 +329,7 @@ export const messageApi = {
   getAround: async (conversationId: string, messageId: string) => {
     const res = await api.get<{
       success: boolean;
-      data: { messages: Message[]; hasMore: boolean };
+      data: { messages: Message[]; hasMore: boolean; hasNewer?: boolean };
     }>(`/messages/${conversationId}/around/${messageId}`);
     return res.data.data;
   },
@@ -388,12 +390,38 @@ export const communityApi = {
     );
     return res.data.data;
   },
+  listMembers: async (
+    id: string,
+    params: { q?: string; role?: 'all' | 'admins' | 'moderators' | 'members' } = {}
+  ) => {
+    const res = await api.get<{ success: boolean; data: CommunityMembersResponse }>(
+      `/communities/${id}/members`,
+      { params }
+    );
+    return res.data.data;
+  },
+  inviteMembers: async (id: string, userIds: string[]) => {
+    const res = await api.post<{
+      success: boolean;
+      message: string;
+      data: { addedCount: number };
+    }>(`/communities/${id}/invite`, { userIds });
+    return res.data;
+  },
   join: async (id: string) => {
     const res = await api.post<{
       success: boolean;
       message: string;
       data: CommunitySummary;
     }>(`/communities/${id}/join`);
+    return res.data;
+  },
+  cancelJoinRequest: async (id: string) => {
+    const res = await api.delete<{
+      success: boolean;
+      message: string;
+      data: CommunitySummary;
+    }>(`/communities/${id}/join-request`);
     return res.data;
   },
   leave: async (id: string) => {
@@ -407,10 +435,13 @@ export const communityApi = {
     targetUserId: string,
     decision: 'approve' | 'reject'
   ) => {
-    const res = await api.post(`/communities/${communityId}/requests`, {
-      targetUserId,
-      decision,
-    });
+    const res = await api.post<{ success: boolean; message: string }>(
+      `/communities/${communityId}/requests`,
+      {
+        targetUserId,
+        decision,
+      }
+    );
     return res.data;
   },
   updateRole: async (
@@ -418,9 +449,46 @@ export const communityApi = {
     memberId: string,
     role: 'admin' | 'moderator' | 'member'
   ) => {
-    const res = await api.patch(`/communities/${communityId}/members/${memberId}`, {
-      role,
-    });
+    const res = await api.patch<{ success: boolean; message: string }>(
+      `/communities/${communityId}/members/${memberId}`,
+      { role }
+    );
+    return res.data;
+  },
+  removeMember: async (communityId: string, memberId: string) => {
+    const res = await api.delete<{ success: boolean; message: string }>(
+      `/communities/${communityId}/members/${memberId}`
+    );
+    return res.data;
+  },
+  updateSettings: async (
+    communityId: string,
+    payload: {
+      name?: string;
+      description?: string;
+      image?: string;
+      privacy?: 'public' | 'private';
+      settings?: Partial<CommunitySettings>;
+    }
+  ) => {
+    const res = await api.patch<{
+      success: boolean;
+      message: string;
+      data: CommunitySummary;
+    }>(`/communities/${communityId}/settings`, payload);
+    return res.data;
+  },
+  transferOwnership: async (communityId: string, newOwnerId: string) => {
+    const res = await api.post<{ success: boolean; message: string }>(
+      `/communities/${communityId}/transfer-ownership`,
+      { newOwnerId }
+    );
+    return res.data;
+  },
+  delete: async (communityId: string) => {
+    const res = await api.delete<{ success: boolean; message: string }>(
+      `/communities/${communityId}`
+    );
     return res.data;
   },
 };
@@ -476,6 +544,30 @@ export const mediaApi = {
       }
     );
     return res.data.data;
+  },
+  fetchAttachmentBlobUrl: async (
+    messageId: string,
+    attachmentIndex: number
+  ): Promise<string> => {
+    const res = await api.get<Blob>(
+      `/media/download/${encodeURIComponent(messageId)}/${attachmentIndex}`,
+      { params: { inline: 1 }, responseType: 'blob' }
+    );
+    return URL.createObjectURL(res.data);
+  },
+  fetchAttachmentText: async (
+    messageId: string,
+    attachmentIndex: number,
+    maxBytes = 65536
+  ): Promise<{ text: string; truncated: boolean }> => {
+    const res = await api.get<Blob>(
+      `/media/download/${encodeURIComponent(messageId)}/${attachmentIndex}`,
+      { params: { inline: 1 }, responseType: 'blob' }
+    );
+    const truncated = res.data.size > maxBytes;
+    const slice = truncated ? res.data.slice(0, maxBytes) : res.data;
+    const text = await slice.text();
+    return { text, truncated };
   },
   downloadAttachment: async (
     messageId: string,

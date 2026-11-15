@@ -2,11 +2,20 @@ import mongoose, { type Document, Schema, type Types } from 'mongoose';
 
 export type CommunityRole = 'owner' | 'admin' | 'moderator' | 'member';
 export type CommunityPrivacy = 'public' | 'private';
+export type CommunityInvitePermission = 'owner_only' | 'admins' | 'moderators' | 'all_members';
+export type CommunityPinPermission = 'admins' | 'moderators';
+export type CommunityPostPermission = 'all_members' | 'moderators_only';
 
 export interface ICommunityMember {
   userId: Types.ObjectId;
   role: CommunityRole;
   joinedAt: Date;
+}
+
+export interface ICommunitySettings {
+  whoCanInvite: CommunityInvitePermission;
+  whoCanPinMessages: CommunityPinPermission;
+  whoCanPost: CommunityPostPermission;
 }
 
 export interface ICommunity extends Document {
@@ -18,6 +27,7 @@ export interface ICommunity extends Document {
   conversationId: Types.ObjectId;
   members: ICommunityMember[];
   pendingRequests: Types.ObjectId[];
+  settings: ICommunitySettings;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -31,6 +41,27 @@ const communityMemberSchema = new Schema<ICommunityMember>(
       default: 'member',
     },
     joinedAt: { type: Date, default: Date.now },
+  },
+  { _id: false }
+);
+
+const communitySettingsSchema = new Schema<ICommunitySettings>(
+  {
+    whoCanInvite: {
+      type: String,
+      enum: ['owner_only', 'admins', 'moderators', 'all_members'],
+      default: 'admins',
+    },
+    whoCanPinMessages: {
+      type: String,
+      enum: ['admins', 'moderators'],
+      default: 'moderators',
+    },
+    whoCanPost: {
+      type: String,
+      enum: ['all_members', 'moderators_only'],
+      default: 'all_members',
+    },
   },
   { _id: false }
 );
@@ -74,6 +105,14 @@ const communitySchema = new Schema<ICommunity>(
       default: [],
     },
     pendingRequests: [{ type: Schema.Types.ObjectId, ref: 'User' }],
+    settings: {
+      type: communitySettingsSchema,
+      default: () => ({
+        whoCanInvite: 'admins',
+        whoCanPinMessages: 'moderators',
+        whoCanPost: 'all_members',
+      }),
+    },
   },
   { timestamps: true }
 );

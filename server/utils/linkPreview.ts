@@ -28,7 +28,9 @@ export function extractUrlsFromText(text: string): string[] {
     try {
       const parsed = new URL(normalized);
       if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') continue;
-      if (!parsed.hostname || !parsed.hostname.includes('.')) continue;
+      if (!parsed.hostname || (!parsed.hostname.includes('.') && parsed.hostname !== 'localhost')) {
+        continue;
+      }
       const href = parsed.toString();
       if (!seen.has(href)) {
         seen.add(href);

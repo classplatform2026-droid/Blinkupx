@@ -269,23 +269,33 @@ export async function updateConversationMeta(req: AuthenticatedRequest, res: Res
     case 'read':
       conv.participants[partIndex].lastReadAt = now;
       break;
-    case 'pinMessage': {
-      const role = conv.participants[partIndex].role;
-      if (conv.type !== 'direct' && !['owner', 'admin', 'moderator'].includes(role)) {
-        throw new AppError('Only moderators or admins can pin messages.', 403, 'FORBIDDEN');
-      }
-      if (!pinnedMessageId) {
-        throw new AppError('Message ID is required to pin.', 400, 'BAD_REQUEST');
-      }
-      conv.pinnedMessageId = new Types.ObjectId(pinnedMessageId);
-      break;
-    }
+    case 'pinMessage':
     case 'unpinMessage': {
-      const role = conv.participants[partIndex].role;
-      if (conv.type !== 'direct' && !['owner', 'admin', 'moderator'].includes(role)) {
-        throw new AppError('Only moderators or admins can unpin messages.', 403, 'FORBIDDEN');
+      let role = conv.participants[partIndex].role;
+      let allowedPinRoles = ['owner', 'admin', 'moderator'];
+      if (conv.communityId) {
+        const community = await Community.findById(conv.communityId).select('members settings');
+        const commMember = community?.members.find((m) => m.userId.toString() === userId);
+        if (commMember) role = commMember.role;
+        if (community?.settings?.whoCanPinMessages === 'admins') {
+          allowedPinRoles = ['owner', 'admin'];
+        }
       }
-      conv.pinnedMessageId = null;
+      if (conv.type !== 'direct' && !allowedPinRoles.includes(role)) {
+        throw new AppError(
+          'You do not have permission to pin or unpin messages here.',
+          403,
+          'FORBIDDEN'
+        );
+      }
+      if (action === 'pinMessage') {
+        if (!pinnedMessageId) {
+          throw new AppError('Message ID is required to pin.', 400, 'BAD_REQUEST');
+        }
+        conv.pinnedMessageId = new Types.ObjectId(pinnedMessageId);
+      } else {
+        conv.pinnedMessageId = null;
+      }
       break;
     }
     default:
@@ -372,6 +382,10 @@ export async function getSharedMedia(req: AuthenticatedRequest, res: Response) {
   const subType = String(req.query.subType || 'all').toLowerCase();
   const limit = Math.min(Number(req.query.limit || 80), 150);
 
+  if (!Types.ObjectId.isValid(id)) {
+    throw new AppError('Invalid conversation identifier.', 400, 'INVALID_CONVERSATION_ID');
+  }
+
   const conv = await Conversation.findOne({
     _id: id,
     'participants.userId': new Types.ObjectId(userId),
@@ -386,7 +400,7 @@ export async function getSharedMedia(req: AuthenticatedRequest, res: Response) {
     deletedAt: null,
     deletedFor: { $ne: new Types.ObjectId(userId) },
     $or: [
-      { 'attachments.0': { $exists: true } },
+      { messageType: { $ne: 'voice' }, 'attachments.0': { $exists: true } },
       { 'links.0': { $exists: true } },
       { content: /(?:https?:\/\/|www\.)/i },
     ],
@@ -464,8 +478,15 @@ export async function getSharedMedia(req: AuthenticatedRequest, res: Response) {
     // Attachments -> Media (photos/videos) or Files (documents)
     (m.attachments || []).forEach((att, idx) => {
       const mime = (att.mimeType || '').toLowerCase();
-      const isImage = mime.startsWith('image/') || (m.messageType === 'image' && !mime.startsWith('video/'));
-      const isVideo = mime.startsWith('video/') || m.messageType === 'video';
+      const ext = getFileExtension(att.fileName || '', att.mimeType || '');
+      const isImage =
+        mime.startsWith('image/') ||
+        ['JPG', 'JPEG', 'PNG', 'WEBP', 'GIF', 'AVIF', 'BMP'].includes(ext) ||
+        (m.messageType === 'image' && !mime.startsWith('video/'));
+      const isVideo =
+        mime.startsWith('video/') ||
+        ['MP4', 'WEBM', 'MOV', '3GP', 'MKV', 'AVI', 'M4V'].includes(ext) ||
+        m.messageType === 'video';
       const isVoice = m.messageType === 'voice' || mime.startsWith('audio/');
       const downloadUrl = `/api/media/download/${m._id.toString()}/${idx}`;
 
@@ -552,6 +573,23 @@ export async function getSharedMedia(req: AuthenticatedRequest, res: Response) {
     links: linkItems.length,
   };
 
+  const docExtensions = new Set([
+    'DOC',
+    'DOCX',
+    'TXT',
+    'CSV',
+    'RTF',
+    'MD',
+    'LOG',
+    'XLS',
+    'XLSX',
+    'PPT',
+    'PPTX',
+    'ODT',
+    'ODS',
+    'ODP',
+  ]);
+
   if (tab === 'files') {
     let filtered = fileItems;
     if (subType === 'pdf') {
@@ -559,12 +597,13 @@ export async function getSharedMedia(req: AuthenticatedRequest, res: Response) {
         (f) => f.mimeType === 'application/pdf' || f.fileExtension === 'PDF'
       );
     } else if (subType === 'doc') {
-      filtered = filtered.filter((f) =>
-        ['DOC', 'DOCX', 'TXT', 'CSV'].includes(f.fileExtension)
-      );
+      filtered = filtered.filter((f) => docExtensions.has(f.fileExtension));
     } else if (subType === 'other') {
       filtered = filtered.filter(
-        (f) => !['PDF', 'DOC', 'DOCX', 'TXT', 'CSV'].includes(f.fileExtension)
+        (f) =>
+          f.mimeType !== 'application/pdf' &&
+          f.fileExtension !== 'PDF' &&
+          !docExtensions.has(f.fileExtension)
       );
     }
     if (q) {

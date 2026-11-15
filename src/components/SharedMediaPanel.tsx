@@ -1,5 +1,8 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
+  ChevronLeft,
+  ChevronRight,
+  Copy,
   Download,
   ExternalLink,
   FileText,
@@ -11,6 +14,7 @@ import {
   Search,
   X,
 } from 'lucide-react';
+import { useSocket } from '../context/SocketContext';
 import { useToast } from '../context/ToastContext';
 import { conversationApi, extractApiError, mediaApi } from '../services/api';
 import type {
@@ -33,12 +37,15 @@ interface SharedMediaPanelProps {
   onJumpToMessage: (messageId: string) => void;
 }
 
+const TEXT_PREVIEW_EXTENSIONS = new Set(['TXT', 'CSV', 'MD', 'JSON', 'LOG']);
+
 export function SharedMediaPanel({
   conversationId,
   open,
   onClose,
   onJumpToMessage,
 }: SharedMediaPanelProps) {
+  const { socket } = useSocket();
   const { showToast } = useToast();
 
   const [tab, setTab] = useState<SharedTab>('media');
@@ -61,35 +68,231 @@ export function SharedMediaPanel({
   const [previewMedia, setPreviewMedia] = useState<SharedMediaItem | null>(null);
   const [previewFile, setPreviewFile] = useState<SharedFileItem | null>(null);
 
+  // Authenticated blob URL fallbacks for media items and PDFs
+  const [fallbackUrls, setFallbackUrls] = useState<Record<string, string>>({});
+  const fallbackUrlsRef = useRef<Record<string, string>>({});
+
+  // Authenticated PDF / text file preview state
+  const [filePreviewBlobUrl, setFilePreviewBlobUrl] = useState<string | null>(null);
+  const [filePreviewText, setFilePreviewText] = useState<{
+    text: string;
+    truncated: boolean;
+  } | null>(null);
+  const [filePreviewLoading, setFilePreviewLoading] = useState(false);
+
+  const hasLoadedOnceRef = useRef(false);
+
+  // Reset state cleanly when switching conversations
+  useEffect(() => {
+    setTab('media');
+    setSubType('all');
+    setQuery('');
+    setDebouncedQuery('');
+    setPreviewMedia(null);
+    setPreviewFile(null);
+    setItems([]);
+    setCounts({ media: 0, files: 0, links: 0 });
+    hasLoadedOnceRef.current = false;
+  }, [conversationId]);
+
   useEffect(() => {
     const timer = setTimeout(() => {
       setDebouncedQuery(query.trim());
-    }, 220);
+    }, 200);
     return () => clearTimeout(timer);
   }, [query]);
 
-  const loadShared = useCallback(async () => {
-    if (!open || !conversationId) return;
-    setLoading(true);
-    setError(null);
-    try {
-      const res = await conversationApi.getSharedMedia(conversationId, {
-        tab,
-        q: debouncedQuery || undefined,
-        subType,
+  // Revoke any created blob object URLs on unmount
+  useEffect(() => {
+    return () => {
+      Object.values(fallbackUrlsRef.current).forEach((u) => {
+        if (u && u.startsWith('blob:')) URL.revokeObjectURL(u);
       });
-      setCounts(res.counts);
-      setItems(res.items);
-    } catch (err) {
-      setError(extractApiError(err).message);
-    } finally {
-      setLoading(false);
-    }
-  }, [open, conversationId, tab, debouncedQuery, subType]);
+    };
+  }, []);
+
+  const loadShared = useCallback(
+    async (silent = false) => {
+      if (!open || !conversationId) return;
+      if (!silent || !hasLoadedOnceRef.current) {
+        setLoading(true);
+      }
+      setError(null);
+      try {
+        const res = await conversationApi.getSharedMedia(conversationId, {
+          tab,
+          q: debouncedQuery || undefined,
+          subType,
+        });
+        setCounts(res.counts);
+        setItems(res.items);
+        hasLoadedOnceRef.current = true;
+      } catch (err) {
+        setError(extractApiError(err).message);
+      } finally {
+        setLoading(false);
+      }
+    },
+    [open, conversationId, tab, debouncedQuery, subType]
+  );
 
   useEffect(() => {
-    loadShared();
+    loadShared(false);
   }, [loadShared]);
+
+  // Real-time Socket.IO & local message sync while Shared Media is open
+  useEffect(() => {
+    if (!open || !conversationId) return;
+
+    const handleSocketMessage = (payload: { conversationId?: string }) => {
+      if (!payload?.conversationId || payload.conversationId === conversationId) {
+        loadShared(true);
+      }
+    };
+
+    const handleLocalRefresh = (ev: Event) => {
+      const detail = (ev as CustomEvent<{ conversationId?: string }>).detail;
+      if (!detail?.conversationId || detail.conversationId === conversationId) {
+        loadShared(true);
+      }
+    };
+
+    if (socket) {
+      socket.on('message:new', handleSocketMessage);
+      socket.on('message:edit', handleSocketMessage);
+      socket.on('message:delete', handleSocketMessage);
+    }
+    window.addEventListener('blinkupz:shared-media-refresh', handleLocalRefresh);
+
+    return () => {
+      if (socket) {
+        socket.off('message:new', handleSocketMessage);
+        socket.off('message:edit', handleSocketMessage);
+        socket.off('message:delete', handleSocketMessage);
+      }
+      window.removeEventListener('blinkupz:shared-media-refresh', handleLocalRefresh);
+    };
+  }, [open, conversationId, socket, loadShared]);
+
+  // Load authenticated inline preview when opening a PDF or text/CSV/JSON/MD file
+  useEffect(() => {
+    if (!previewFile) {
+      setFilePreviewText(null);
+      setFilePreviewLoading(false);
+      setFilePreviewBlobUrl((prev) => {
+        if (prev && prev.startsWith('blob:')) URL.revokeObjectURL(prev);
+        return null;
+      });
+      return;
+    }
+
+    const isPdf =
+      previewFile.mimeType === 'application/pdf' ||
+      previewFile.fileExtension.toUpperCase() === 'PDF';
+    const isText =
+      previewFile.mimeType.startsWith('text/') ||
+      previewFile.mimeType === 'application/json' ||
+      TEXT_PREVIEW_EXTENSIONS.has(previewFile.fileExtension.toUpperCase());
+
+    if (!isPdf && !isText) {
+      setFilePreviewText(null);
+      setFilePreviewBlobUrl(null);
+      return;
+    }
+
+    let cancelled = false;
+    let createdBlobUrl: string | null = null;
+    setFilePreviewLoading(true);
+    setFilePreviewText(null);
+
+    (async () => {
+      try {
+        if (isPdf) {
+          const blobUrl = await mediaApi.fetchAttachmentBlobUrl(
+            previewFile.messageId,
+            previewFile.attachmentIndex
+          );
+          if (cancelled) {
+            URL.revokeObjectURL(blobUrl);
+            return;
+          }
+          createdBlobUrl = blobUrl;
+          setFilePreviewBlobUrl(blobUrl);
+        } else if (isText) {
+          const textData = await mediaApi.fetchAttachmentText(
+            previewFile.messageId,
+            previewFile.attachmentIndex
+          );
+          if (!cancelled) {
+            setFilePreviewText(textData);
+          }
+        }
+      } catch {
+        // Fallback to direct URL or download button cleanly
+        if (!cancelled && isPdf) {
+          setFilePreviewBlobUrl(previewFile.url);
+        }
+      } finally {
+        if (!cancelled) {
+          setFilePreviewLoading(false);
+        }
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+      if (createdBlobUrl && createdBlobUrl.startsWith('blob:')) {
+        URL.revokeObjectURL(createdBlobUrl);
+      }
+    };
+  }, [previewFile]);
+
+  const tryAuthenticatedMediaFallback = useCallback(
+    async (item: SharedMediaItem) => {
+      if (fallbackUrlsRef.current[item.id] !== undefined) return;
+      fallbackUrlsRef.current[item.id] = '';
+      setFallbackUrls((prev) => ({ ...prev, [item.id]: '' }));
+      try {
+        const blobUrl = await mediaApi.fetchAttachmentBlobUrl(
+          item.messageId,
+          item.attachmentIndex
+        );
+        fallbackUrlsRef.current[item.id] = blobUrl;
+        setFallbackUrls((prev) => ({ ...prev, [item.id]: blobUrl }));
+      } catch {
+        // Remains '' to show unavailable state
+      }
+    },
+    []
+  );
+
+  const mediaList = useMemo(
+    () => (tab === 'media' ? (items as SharedMediaItem[]) : []),
+    [tab, items]
+  );
+
+  const previewMediaIndex = useMemo(() => {
+    if (!previewMedia) return -1;
+    return mediaList.findIndex((m) => m.id === previewMedia.id);
+  }, [previewMedia, mediaList]);
+
+  // Keyboard Left/Right navigation in Media Preview Modal
+  useEffect(() => {
+    if (!previewMedia || mediaList.length <= 1) return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'ArrowLeft' && previewMediaIndex > 0) {
+        setPreviewMedia(mediaList[previewMediaIndex - 1]);
+      } else if (
+        e.key === 'ArrowRight' &&
+        previewMediaIndex >= 0 &&
+        previewMediaIndex < mediaList.length - 1
+      ) {
+        setPreviewMedia(mediaList[previewMediaIndex + 1]);
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [previewMedia, previewMediaIndex, mediaList]);
 
   const handleTabChange = (nextTab: SharedTab) => {
     setTab(nextTab);
@@ -120,6 +323,12 @@ export function SharedMediaPanel({
   };
 
   if (!open) return null;
+
+  const isPreviewPdf = Boolean(
+    previewFile &&
+      (previewFile.mimeType === 'application/pdf' ||
+        previewFile.fileExtension.toUpperCase() === 'PDF')
+  );
 
   return (
     <>
@@ -257,7 +466,7 @@ export function SharedMediaPanel({
           {loading ? (
             <LoadingState rows={5} />
           ) : error ? (
-            <ErrorState message={error} onRetry={loadShared} />
+            <ErrorState message={error} onRetry={() => loadShared(false)} />
           ) : items.length === 0 ? (
             <EmptyState
               icon={
@@ -282,42 +491,63 @@ export function SharedMediaPanel({
             />
           ) : tab === 'media' ? (
             <div className="grid grid-cols-3 gap-1.5">
-              {(items as SharedMediaItem[]).map((item) => (
-                <button
-                  key={item.id}
-                  type="button"
-                  onClick={() => setPreviewMedia(item)}
-                  className="group relative aspect-square rounded-xl overflow-hidden bg-[#202020] border border-[#303030] hover:border-[#FFFFFF]/40 transition-colors cursor-pointer"
-                >
-                  {item.kind === 'video' ? (
-                    <>
-                      <video
-                        src={item.url}
-                        muted
-                        playsInline
-                        preload="metadata"
-                        className="w-full h-full object-cover"
-                      />
-                      <span className="absolute inset-0 flex items-center justify-center bg-black/35 group-hover:bg-black/20 transition-colors">
-                        <span className="w-8 h-8 rounded-full bg-[#181818]/85 border border-[#FFFFFF]/30 flex items-center justify-center text-[#FFFFFF]">
-                          <Play className="w-3.5 h-3.5 fill-current ml-0.5" />
+              {(items as SharedMediaItem[]).map((item) => {
+                const resolvedUrl =
+                  fallbackUrls[item.id] && fallbackUrls[item.id].length > 0
+                    ? fallbackUrls[item.id]
+                    : item.url;
+                const isUnavailable = fallbackUrls[item.id] === '';
+
+                return (
+                  <button
+                    key={item.id}
+                    type="button"
+                    onClick={() => setPreviewMedia(item)}
+                    className="group relative aspect-square rounded-xl overflow-hidden bg-[#202020] border border-[#303030] hover:border-[#FFFFFF]/40 transition-colors cursor-pointer"
+                  >
+                    {isUnavailable ? (
+                      <div className="w-full h-full flex flex-col items-center justify-center gap-1 p-2 text-[#999999]">
+                        {item.kind === 'video' ? (
+                          <Film className="w-5 h-5" />
+                        ) : (
+                          <ImageIcon className="w-5 h-5" />
+                        )}
+                        <span className="text-[10px] truncate max-w-full">
+                          {item.fileName}
                         </span>
-                      </span>
-                      <span className="absolute top-1.5 left-1.5 px-1.5 py-0.5 rounded bg-black/70 text-[10px] font-mono text-[#FFFFFF] flex items-center gap-1">
-                        <Film className="w-2.5 h-2.5" />
-                      </span>
-                    </>
-                  ) : (
-                    <img
-                      src={item.url}
-                      alt={item.fileName}
-                      loading="lazy"
-                      referrerPolicy="no-referrer"
-                      className="w-full h-full object-cover group-hover:scale-[1.03] transition-transform duration-200"
-                    />
-                  )}
-                </button>
-              ))}
+                      </div>
+                    ) : item.kind === 'video' ? (
+                      <>
+                        <video
+                          src={resolvedUrl}
+                          muted
+                          playsInline
+                          preload="metadata"
+                          onError={() => tryAuthenticatedMediaFallback(item)}
+                          className="w-full h-full object-cover"
+                        />
+                        <span className="absolute inset-0 flex items-center justify-center bg-black/35 group-hover:bg-black/20 transition-colors">
+                          <span className="w-8 h-8 rounded-full bg-[#181818]/85 border border-[#FFFFFF]/30 flex items-center justify-center text-[#FFFFFF]">
+                            <Play className="w-3.5 h-3.5 fill-current ml-0.5" />
+                          </span>
+                        </span>
+                        <span className="absolute top-1.5 left-1.5 px-1.5 py-0.5 rounded bg-black/70 text-[10px] font-mono text-[#FFFFFF] flex items-center gap-1">
+                          <Film className="w-2.5 h-2.5" />
+                        </span>
+                      </>
+                    ) : (
+                      <img
+                        src={resolvedUrl}
+                        alt={item.fileName}
+                        loading="lazy"
+                        referrerPolicy="no-referrer"
+                        onError={() => tryAuthenticatedMediaFallback(item)}
+                        className="w-full h-full object-cover group-hover:scale-[1.03] transition-transform duration-200"
+                      />
+                    )}
+                  </button>
+                );
+              })}
             </div>
           ) : tab === 'files' ? (
             <div className="space-y-2">
@@ -417,14 +647,27 @@ export function SharedMediaPanel({
                     <span className="text-[11px] text-[#999999] truncate">
                       {link.sender?.fullName || 'User'} · {formatConversationTime(link.createdAt)}
                     </span>
-                    <button
-                      type="button"
-                      onClick={() => handleJump(link.messageId)}
-                      className="inline-flex items-center gap-1 text-xs font-medium text-[#FFFFFF] hover:underline cursor-pointer shrink-0"
-                    >
-                      <MessageSquare className="w-3 h-3" />
-                      <span>Original message</span>
-                    </button>
+                    <div className="flex items-center gap-2.5 shrink-0">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          navigator.clipboard?.writeText(link.url);
+                          showToast('Link copied.', 'info');
+                        }}
+                        aria-label="Copy link"
+                        className="text-[#999999] hover:text-[#FFFFFF] p-1 cursor-pointer"
+                      >
+                        <Copy className="w-3.5 h-3.5" />
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleJump(link.messageId)}
+                        className="inline-flex items-center gap-1 text-xs font-medium text-[#FFFFFF] hover:underline cursor-pointer"
+                      >
+                        <MessageSquare className="w-3 h-3" />
+                        <span>Original message</span>
+                      </button>
+                    </div>
                   </div>
                 </div>
               ))}
@@ -442,22 +685,71 @@ export function SharedMediaPanel({
       >
         {previewMedia && (
           <div className="space-y-4">
-            <div className="rounded-xl overflow-hidden bg-black flex items-center justify-center">
-              {previewMedia.kind === 'video' ? (
+            <div className="relative rounded-xl overflow-hidden bg-black flex items-center justify-center min-h-[220px]">
+              {fallbackUrls[previewMedia.id] === '' ? (
+                <div className="py-16 px-6 text-center space-y-2 text-[#999999]">
+                  {previewMedia.kind === 'video' ? (
+                    <Film className="w-8 h-8 mx-auto" />
+                  ) : (
+                    <ImageIcon className="w-8 h-8 mx-auto" />
+                  )}
+                  <p className="text-sm text-[#FFFFFF]">Media file unavailable</p>
+                  <p className="text-xs">
+                    The file may have expired from temporary storage or been removed.
+                  </p>
+                </div>
+              ) : previewMedia.kind === 'video' ? (
                 <video
-                  src={previewMedia.url}
+                  key={previewMedia.id}
+                  src={
+                    fallbackUrls[previewMedia.id] && fallbackUrls[previewMedia.id].length > 0
+                      ? fallbackUrls[previewMedia.id]
+                      : previewMedia.url
+                  }
                   controls
                   autoPlay
+                  playsInline
+                  onError={() => tryAuthenticatedMediaFallback(previewMedia)}
                   className="w-full max-h-[65vh] rounded-xl"
                 />
               ) : (
                 <img
-                  src={previewMedia.url}
+                  key={previewMedia.id}
+                  src={
+                    fallbackUrls[previewMedia.id] && fallbackUrls[previewMedia.id].length > 0
+                      ? fallbackUrls[previewMedia.id]
+                      : previewMedia.url
+                  }
                   alt={previewMedia.fileName}
                   referrerPolicy="no-referrer"
+                  onError={() => tryAuthenticatedMediaFallback(previewMedia)}
                   className="w-full max-h-[65vh] object-contain"
                 />
               )}
+
+              {mediaList.length > 1 && previewMediaIndex > 0 && (
+                <button
+                  type="button"
+                  onClick={() => setPreviewMedia(mediaList[previewMediaIndex - 1])}
+                  aria-label="Previous media"
+                  className="absolute left-2.5 top-1/2 -translate-y-1/2 w-9 h-9 rounded-full bg-black/70 border border-[#FFFFFF]/20 flex items-center justify-center text-[#FFFFFF] hover:bg-black cursor-pointer"
+                >
+                  <ChevronLeft className="w-5 h-5" />
+                </button>
+              )}
+
+              {mediaList.length > 1 &&
+                previewMediaIndex >= 0 &&
+                previewMediaIndex < mediaList.length - 1 && (
+                  <button
+                    type="button"
+                    onClick={() => setPreviewMedia(mediaList[previewMediaIndex + 1])}
+                    aria-label="Next media"
+                    className="absolute right-2.5 top-1/2 -translate-y-1/2 w-9 h-9 rounded-full bg-black/70 border border-[#FFFFFF]/20 flex items-center justify-center text-[#FFFFFF] hover:bg-black cursor-pointer"
+                  >
+                    <ChevronRight className="w-5 h-5" />
+                  </button>
+                )}
             </div>
 
             {previewMedia.caption && (
@@ -473,6 +765,11 @@ export function SharedMediaPanel({
                   {previewMedia.sender?.fullName || 'User'}
                 </span>{' '}
                 · {formatFileSize(previewMedia.fileSize)}
+                {mediaList.length > 1 && previewMediaIndex >= 0 && (
+                  <span className="ml-2 font-mono tabular-nums">
+                    ({previewMediaIndex + 1}/{mediaList.length})
+                  </span>
+                )}
               </div>
               <div className="flex items-center gap-2">
                 <PrimaryButton
@@ -529,15 +826,43 @@ export function SharedMediaPanel({
               </div>
             </div>
 
-            {previewFile.mimeType === 'application/pdf' && (
-              <div className="rounded-xl overflow-hidden border border-[#303030] bg-[#181818] h-64">
-                <iframe
-                  src={previewFile.url}
-                  title={previewFile.fileName}
-                  className="w-full h-full"
-                />
+            {filePreviewLoading ? (
+              <div className="rounded-xl border border-[#303030] bg-[#181818] p-6 text-center text-xs text-[#999999]">
+                Loading file preview...
               </div>
-            )}
+            ) : isPreviewPdf && filePreviewBlobUrl ? (
+              <div className="space-y-2">
+                <div className="rounded-xl overflow-hidden border border-[#303030] bg-[#181818] h-64">
+                  <iframe
+                    src={filePreviewBlobUrl}
+                    title={previewFile.fileName}
+                    className="w-full h-full"
+                  />
+                </div>
+                <div className="flex justify-end">
+                  <a
+                    href={filePreviewBlobUrl}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="inline-flex items-center gap-1.5 text-xs text-[#FFFFFF] hover:underline"
+                  >
+                    <ExternalLink className="w-3.5 h-3.5" />
+                    <span>Open PDF in browser tab</span>
+                  </a>
+                </div>
+              </div>
+            ) : filePreviewText ? (
+              <div className="rounded-xl border border-[#303030] bg-[#181818] p-3 max-h-60 overflow-auto">
+                <pre className="text-xs font-mono text-[#FFFFFF] whitespace-pre-wrap break-words leading-relaxed">
+                  {filePreviewText.text || '(Empty file)'}
+                </pre>
+                {filePreviewText.truncated && (
+                  <p className="text-[11px] text-[#999999] mt-2 pt-2 border-t border-[#303030]">
+                    Preview truncated at 64 KB. Download to view the full file.
+                  </p>
+                )}
+              </div>
+            ) : null}
 
             {previewFile.caption && (
               <p className="text-sm text-[#FFFFFF] bg-[#242424] border border-[#303030] rounded-xl px-3.5 py-2.5">

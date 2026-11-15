@@ -13,11 +13,42 @@ import {
   SmilePlus,
   Trash2,
 } from 'lucide-react';
+import { useToast } from '../context/ToastContext';
 import type { Message } from '../types';
-import { mediaApi } from '../services/api';
+import { extractApiError, mediaApi } from '../services/api';
 import { formatDuration, formatFileSize, formatTime } from '../utils/formatters';
 import { EmojiPicker } from './EmojiPicker';
 import { UserAvatar } from './UserAvatar';
+
+function renderMessageText(text: string, isOwn: boolean) {
+  const regex = /((?:https?:\/\/|www\.)[^\s<>"'`)\]]+)/gi;
+  const parts = text.split(regex);
+  return parts.map((part, idx) => {
+    if (!part) return null;
+    if (/^(?:https?:\/\/|www\.)/i.test(part)) {
+      const cleanUrl = part.replace(/[.,!?;:'")\]}>]+$/, '');
+      const trailing = part.slice(cleanUrl.length);
+      const href = /^https?:\/\//i.test(cleanUrl) ? cleanUrl : `https://${cleanUrl}`;
+      return (
+        <React.Fragment key={idx}>
+          <a
+            href={href}
+            target="_blank"
+            rel="noopener noreferrer"
+            onClick={(e) => e.stopPropagation()}
+            className={`underline underline-offset-2 break-all ${
+              isOwn ? 'text-[#181818] hover:opacity-80' : 'text-[#FFFFFF] hover:opacity-80'
+            }`}
+          >
+            {cleanUrl}
+          </a>
+          {trailing}
+        </React.Fragment>
+      );
+    }
+    return <React.Fragment key={idx}>{part}</React.Fragment>;
+  });
+}
 
 interface MessageBubbleProps {
   message: Message;
@@ -54,11 +85,24 @@ export function MessageBubble({
   onCopy,
   onPreviewImage,
 }: MessageBubbleProps) {
+  const { showToast } = useToast();
   const [menuOpen, setMenuOpen] = useState(false);
   const [reactOpen, setReactOpen] = useState(false);
   const [swipeOffset, setSwipeOffset] = useState(0);
+  const [fallbackUrls, setFallbackUrls] = useState<Record<number, string>>({});
   const pointerStartX = useRef<number | null>(null);
   const longPressTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const tryAuthenticatedMediaFallback = async (idx: number) => {
+    if (fallbackUrls[idx] !== undefined) return;
+    setFallbackUrls((prev) => ({ ...prev, [idx]: '' }));
+    try {
+      const blobUrl = await mediaApi.fetchAttachmentBlobUrl(message.id, idx);
+      setFallbackUrls((prev) => ({ ...prev, [idx]: blobUrl }));
+    } catch {
+      // Leave empty to indicate unavailable
+    }
+  };
 
   if (message.messageType === 'system') {
     return (
@@ -230,20 +274,32 @@ export function MessageBubble({
 
             {!isDeleted &&
               message.attachments.map((att, idx) => {
+                const resolvedUrl =
+                  fallbackUrls[idx] && fallbackUrls[idx].length > 0
+                    ? fallbackUrls[idx]
+                    : att.url;
+
                 if (message.messageType === 'image' || att.mimeType.startsWith('image/')) {
                   return (
                     <button
                       key={`${att.url}-${idx}`}
                       type="button"
-                      onClick={() => onPreviewImage(att.url)}
+                      onClick={() => onPreviewImage(resolvedUrl)}
                       className="block mb-1.5 overflow-hidden rounded-xl cursor-pointer"
                     >
-                      <img
-                        src={att.url}
-                        alt={att.fileName || 'Shared image'}
-                        referrerPolicy="no-referrer"
-                        className="max-h-72 w-auto object-cover rounded-xl"
-                      />
+                      {fallbackUrls[idx] === '' ? (
+                        <div className="px-3 py-4 rounded-xl bg-[#181818]/20 text-xs opacity-75">
+                          Image unavailable
+                        </div>
+                      ) : (
+                        <img
+                          src={resolvedUrl}
+                          alt={att.fileName || 'Shared image'}
+                          referrerPolicy="no-referrer"
+                          onError={() => tryAuthenticatedMediaFallback(idx)}
+                          className="max-h-72 w-auto object-cover rounded-xl"
+                        />
+                      )}
                     </button>
                   );
                 }
@@ -252,9 +308,10 @@ export function MessageBubble({
                   return (
                     <video
                       key={`${att.url}-${idx}`}
-                      src={att.url}
+                      src={resolvedUrl}
                       controls
                       preload="metadata"
+                      onError={() => tryAuthenticatedMediaFallback(idx)}
                       className="max-h-72 w-full rounded-xl mb-1.5 bg-black"
                     />
                   );
@@ -263,7 +320,12 @@ export function MessageBubble({
                 if (message.messageType === 'voice' || att.mimeType.startsWith('audio/')) {
                   return (
                     <div key={`${att.url}-${idx}`} className="flex flex-col gap-1 min-w-[210px] py-1">
-                      <audio src={att.url} controls className="w-full h-9" />
+                      <audio
+                        src={resolvedUrl}
+                        controls
+                        onError={() => tryAuthenticatedMediaFallback(idx)}
+                        className="w-full h-9"
+                      />
                       {att.duration ? (
                         <span
                           className={`text-[11px] font-mono tabular-nums ${
@@ -284,7 +346,7 @@ export function MessageBubble({
                     onClick={() => {
                       mediaApi
                         .downloadAttachment(message.id, idx, att.fileName || 'attachment')
-                        .catch(() => undefined);
+                        .catch((err) => showToast(extractApiError(err).message, 'error'));
                     }}
                     className={`w-full text-left flex items-center gap-3 p-2.5 rounded-xl mb-1.5 cursor-pointer transition-colors ${
                       isOwn
@@ -305,7 +367,9 @@ export function MessageBubble({
               })}
 
             {message.content && (
-              <p className="whitespace-pre-wrap">{message.content}</p>
+              <p className="whitespace-pre-wrap">
+                {isDeleted ? message.content : renderMessageText(message.content, isOwn)}
+              </p>
             )}
 
             <div

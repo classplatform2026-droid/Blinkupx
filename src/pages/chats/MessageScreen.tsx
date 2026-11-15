@@ -58,6 +58,8 @@ export function MessageScreen({ conversationId }: { conversationId: string }) {
   const [inChatQuery, setInChatQuery] = useState('');
   const [sharedMediaOpen, setSharedMediaOpen] = useState(false);
   const [jumpedMessageId, setJumpedMessageId] = useState<string | null>(null);
+  const [pendingScrollId, setPendingScrollId] = useState<string | null>(null);
+  const [hasNewerMessages, setHasNewerMessages] = useState(false);
 
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
@@ -66,13 +68,19 @@ export function MessageScreen({ conversationId }: { conversationId: string }) {
     setError(null);
     setLoading(true);
     try {
-      const [convData, msgData] = await Promise.all([
-        conversationApi.getById(conversationId),
-        messageApi.list(conversationId),
-      ]);
+      const convData = await conversationApi.getById(conversationId);
+      const msgData = highlightId
+        ? await messageApi.getAround(conversationId, highlightId).catch(() => messageApi.list(conversationId))
+        : await messageApi.list(conversationId);
+
       setConversation(convData);
       setMessages(msgData.messages);
       setHasMore(msgData.hasMore);
+      setHasNewerMessages(Boolean('hasNewer' in msgData && msgData.hasNewer));
+      if (highlightId) {
+        setPendingScrollId(highlightId);
+        setJumpedMessageId(highlightId);
+      }
 
       socket?.emit('group:join', { conversationId });
       socket?.emit('message:read', { conversationId });
@@ -81,40 +89,48 @@ export function MessageScreen({ conversationId }: { conversationId: string }) {
     } finally {
       setLoading(false);
     }
-  }, [conversationId, socket]);
+  }, [conversationId, highlightId, socket]);
 
   useEffect(() => {
     loadThread();
   }, [loadThread]);
 
-  // Scroll to highlighted message or bottom after initial load
+  // Deterministic scroll when pendingScrollId or messages commit
   useEffect(() => {
     if (loading) return;
-    if (highlightId) {
-      const el = document.getElementById(`msg-${highlightId}`);
+    if (pendingScrollId) {
+      const el = document.getElementById(`msg-${pendingScrollId}`);
       if (el) {
         el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        setPendingScrollId(null);
         return;
       }
     }
-    bottomRef.current?.scrollIntoView({ behavior: 'auto' });
-  }, [loading, highlightId]);
+  }, [loading, messages, pendingScrollId]);
+
+  useEffect(() => {
+    if (!loading && !highlightId && !hasNewerMessages) {
+      bottomRef.current?.scrollIntoView({ behavior: 'auto' });
+    }
+  }, [loading, highlightId, hasNewerMessages]);
 
   useEffect(() => {
     if (!socket) return;
 
     const onNewMessage = (msg: Message) => {
       if (msg.conversationId !== conversationId) return;
-      setMessages((prev) => {
-        if (prev.some((m) => m.id === msg.id)) return prev;
-        return [...prev, msg];
-      });
+      if (!hasNewerMessages) {
+        setMessages((prev) => {
+          if (prev.some((m) => m.id === msg.id)) return prev;
+          return [...prev, msg];
+        });
+        setTimeout(() => {
+          bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
+        }, 40);
+      }
       if (msg.senderId !== user?.id) {
         socket.emit('message:read', { conversationId });
       }
-      setTimeout(() => {
-        bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
-      }, 40);
     };
 
     const onEditMessage = (updated: Message) => {
@@ -220,7 +236,7 @@ export function MessageScreen({ conversationId }: { conversationId: string }) {
       socket.off('reaction:remove', onReaction);
       socket.off('conversation:updated', onConvUpdated);
     };
-  }, [socket, conversationId, user?.id]);
+  }, [socket, conversationId, user?.id, hasNewerMessages]);
 
   const loadOlder = async () => {
     if (!hasMore || loadingOlder || messages.length === 0) return;
@@ -257,8 +273,18 @@ export function MessageScreen({ conversationId }: { conversationId: string }) {
       replyTo: replyingTo?.id || null,
     });
     setReplyingTo(null);
-    setMessages((prev) =>
-      prev.some((m) => m.id === created.id) ? prev : [...prev, created]
+    if (hasNewerMessages) {
+      const latest = await messageApi.list(conversationId);
+      setMessages(latest.messages);
+      setHasMore(latest.hasMore);
+      setHasNewerMessages(false);
+    } else {
+      setMessages((prev) =>
+        prev.some((m) => m.id === created.id) ? prev : [...prev, created]
+      );
+    }
+    window.dispatchEvent(
+      new CustomEvent('blinkupz:shared-media-refresh', { detail: { conversationId } })
     );
     setTimeout(() => {
       bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -269,6 +295,9 @@ export function MessageScreen({ conversationId }: { conversationId: string }) {
     const updated = await messageApi.edit(messageId, content);
     setEditingMessage(null);
     setMessages((prev) => prev.map((m) => (m.id === updated.id ? updated : m)));
+    window.dispatchEvent(
+      new CustomEvent('blinkupz:shared-media-refresh', { detail: { conversationId } })
+    );
   };
 
   const handleDeleteMessage = async (msg: Message, scope: 'everyone' | 'me') => {
@@ -291,6 +320,9 @@ export function MessageScreen({ conversationId }: { conversationId: string }) {
           )
         );
       }
+      window.dispatchEvent(
+        new CustomEvent('blinkupz:shared-media-refresh', { detail: { conversationId } })
+      );
     } catch (err) {
       showToast(extractApiError(err).message, 'error');
     }
@@ -349,19 +381,13 @@ export function MessageScreen({ conversationId }: { conversationId: string }) {
     setInChatSearchOpen(false);
     setInChatQuery('');
 
-    const scrollToTarget = () => {
-      setJumpedMessageId(messageId);
-      requestAnimationFrame(() => {
-        const el = document.getElementById(`msg-${messageId}`);
-        el?.scrollIntoView({ behavior: 'smooth', block: 'center' });
-      });
-      setTimeout(() => {
-        setJumpedMessageId((curr) => (curr === messageId ? null : curr));
-      }, 2600);
-    };
+    setJumpedMessageId(messageId);
+    setTimeout(() => {
+      setJumpedMessageId((curr) => (curr === messageId ? null : curr));
+    }, 2600);
 
     if (messages.some((m) => m.id === messageId)) {
-      scrollToTarget();
+      setPendingScrollId(messageId);
       return;
     }
 
@@ -369,7 +395,22 @@ export function MessageScreen({ conversationId }: { conversationId: string }) {
       const around = await messageApi.getAround(conversationId, messageId);
       setMessages(around.messages);
       setHasMore(around.hasMore);
-      setTimeout(scrollToTarget, 60);
+      setHasNewerMessages(Boolean(around.hasNewer));
+      setPendingScrollId(messageId);
+    } catch (err) {
+      showToast(extractApiError(err).message, 'error');
+    }
+  };
+
+  const handleBackToLatest = async () => {
+    try {
+      const latest = await messageApi.list(conversationId);
+      setMessages(latest.messages);
+      setHasMore(latest.hasMore);
+      setHasNewerMessages(false);
+      setTimeout(() => {
+        bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
+      }, 40);
     } catch (err) {
       showToast(extractApiError(err).message, 'error');
     }
@@ -440,8 +481,8 @@ export function MessageScreen({ conversationId }: { conversationId: string }) {
     <div className="flex-1 flex h-full overflow-hidden bg-[#181818]">
       <div className="flex-1 flex flex-col min-w-0 h-full overflow-hidden bg-[#181818]">
       {/* Header */}
-      <header className="h-16 px-3 sm:px-5 flex items-center justify-between gap-3 border-b border-[#303030] bg-[#181818] shrink-0">
-        <div className="flex items-center gap-3 min-w-0">
+      <header className="h-16 px-3 sm:px-5 flex items-center justify-between gap-2 sm:gap-3 border-b border-[#303030] bg-[#181818] shrink-0">
+        <div className="flex items-center gap-2.5 sm:gap-3 min-w-0 flex-1">
           <button
             type="button"
             onClick={() => navigate('/chats')}
@@ -458,7 +499,7 @@ export function MessageScreen({ conversationId }: { conversationId: string }) {
             online={conversation.type === 'direct' && peerOnline}
           />
 
-          <div className="min-w-0">
+          <div className="min-w-0 flex-1">
             <h2 className="text-sm sm:text-base font-semibold text-[#FFFFFF] truncate">
               {conversation.name}
             </h2>
@@ -474,7 +515,7 @@ export function MessageScreen({ conversationId }: { conversationId: string }) {
           </div>
         </div>
 
-        <div className="flex items-center gap-1 shrink-0">
+        <div className="flex items-center gap-0.5 sm:gap-1 shrink-0">
           {conversation.type === 'direct' && (
             <>
               <button
@@ -496,32 +537,6 @@ export function MessageScreen({ conversationId }: { conversationId: string }) {
             </>
           )}
 
-          <button
-            type="button"
-            onClick={() => setSharedMediaOpen((p) => !p)}
-            aria-label="Shared Media"
-            title="Shared Media"
-            className={`min-w-[40px] min-h-[40px] rounded-xl flex items-center justify-center transition-colors cursor-pointer ${
-              sharedMediaOpen
-                ? 'bg-[#242424] text-[#FFFFFF]'
-                : 'text-[#999999] hover:text-[#FFFFFF] hover:bg-[#242424]'
-            }`}
-          >
-            <Images className="w-4 h-4" />
-          </button>
-
-          <button
-            type="button"
-            onClick={() => {
-              setInChatSearchOpen((p) => !p);
-              setInChatQuery('');
-            }}
-            aria-label="Search in conversation"
-            className="min-w-[40px] min-h-[40px] rounded-xl flex items-center justify-center text-[#999999] hover:text-[#FFFFFF] hover:bg-[#242424] transition-colors cursor-pointer"
-          >
-            <Search className="w-4 h-4" />
-          </button>
-
           <DropdownMenu
             trigger={
               <button
@@ -534,9 +549,17 @@ export function MessageScreen({ conversationId }: { conversationId: string }) {
             }
             options={[
               {
-                label: 'Shared media',
+                label: inChatSearchOpen ? 'Close search' : 'Search messages',
+                icon: <Search className="w-4 h-4" />,
+                onClick: () => {
+                  setInChatSearchOpen((p) => !p);
+                  setInChatQuery('');
+                },
+              },
+              {
+                label: sharedMediaOpen ? 'Close shared media' : 'Shared media',
                 icon: <Images className="w-4 h-4" />,
-                onClick: () => setSharedMediaOpen(true),
+                onClick: () => setSharedMediaOpen((p) => !p),
               },
               {
                 label: conversation.isPinned ? 'Unpin chat' : 'Pin chat',
@@ -715,6 +738,17 @@ export function MessageScreen({ conversationId }: { conversationId: string }) {
               </React.Fragment>
             );
           })
+        )}
+        {hasNewerMessages && (
+          <div className="flex justify-center pt-3">
+            <PrimaryButton
+              variant="secondary"
+              onClick={handleBackToLatest}
+              className="text-xs min-h-[36px] py-1.5 px-3.5"
+            >
+              Back to latest messages
+            </PrimaryButton>
+          </div>
         )}
         <div ref={bottomRef} />
       </div>

@@ -188,7 +188,7 @@ export async function uploadMedia(req: AuthenticatedRequest, res: Response) {
       publicId: result.publicId,
       fileName: file.originalname,
       fileSize: result.bytes || file.size,
-      mimeType: file.mimetype,
+      mimeType: result.mimeType,
     },
   });
 }
@@ -274,6 +274,11 @@ export async function downloadAttachment(req: AuthenticatedRequest, res: Respons
   const userId = req.userId!;
   const { messageId, attachmentIndex } = req.params;
   const idx = Number(attachmentIndex);
+  const inline = req.query.inline === '1';
+
+  if (!Types.ObjectId.isValid(messageId)) {
+    throw new AppError('Invalid message identifier.', 400, 'INVALID_MESSAGE_ID');
+  }
 
   if (!Number.isInteger(idx) || idx < 0) {
     throw new AppError('Invalid attachment index.', 400, 'INVALID_ATTACHMENT');
@@ -303,16 +308,36 @@ export async function downloadAttachment(req: AuthenticatedRequest, res: Respons
 
   const safeName = sanitizeDownloadFilename(att.fileName || 'attachment');
   res.setHeader('X-Content-Type-Options', 'nosniff');
-  res.setHeader('Content-Disposition', `attachment; filename="${safeName}"`);
+  res.setHeader(
+    'Content-Disposition',
+    `${inline ? 'inline' : 'attachment'}; filename="${safeName}"`
+  );
   if (att.mimeType) {
     res.setHeader('Content-Type', att.mimeType);
   }
 
+  let localFileId: string | null = null;
   if (att.publicId?.startsWith('local:')) {
-    const fileId = att.publicId.slice('local:'.length);
-    const { filePath } = getLocalUploadPaths(fileId);
+    localFileId = att.publicId.slice('local:'.length);
+  } else if (att.url?.startsWith('/api/media/access/')) {
+    const rawPath = att.url.slice('/api/media/access/'.length).split('?')[0];
+    if (rawPath) localFileId = rawPath;
+  }
+
+  if (localFileId) {
+    const { filePath, metaPath } = getLocalUploadPaths(localFileId);
     if (!fs.existsSync(filePath)) {
       throw new AppError('Stored file not found.', 404, 'FILE_NOT_FOUND');
+    }
+    if (!att.mimeType) {
+      try {
+        const meta = JSON.parse(await fs.promises.readFile(metaPath, 'utf8')) as {
+          mimeType?: string;
+        };
+        if (meta.mimeType) res.setHeader('Content-Type', meta.mimeType);
+      } catch {
+        // Ignore missing metadata
+      }
     }
     const stat = await fs.promises.stat(filePath);
     res.setHeader('Content-Length', String(stat.size));

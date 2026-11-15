@@ -9,7 +9,7 @@ export function AppLayout({ children }: { children: React.ReactNode }) {
   // Hide mobile bottom navigation when inside full-screen message or sub-flow screens
   const isDetailScreen =
     /^\/chats\/[^/]+$/.test(location.pathname) ||
-    /^\/community\/[^/]+$/.test(location.pathname) ||
+    /^\/community\/[^/]+(\/.*)?$/.test(location.pathname) ||
     location.pathname === '/profile/edit' ||
     location.pathname === '/profile/settings';
 

@@ -127,6 +127,33 @@ export interface Message {
   createdAt: string;
 }
 
+export type CommunityRole = 'owner' | 'admin' | 'moderator' | 'member';
+export type CommunityInvitePermission = 'owner_only' | 'admins' | 'moderators' | 'all_members';
+export type CommunityPinPermission = 'admins' | 'moderators';
+export type CommunityPostPermission = 'all_members' | 'moderators_only';
+
+export interface CommunitySettings {
+  whoCanInvite: CommunityInvitePermission;
+  whoCanPinMessages: CommunityPinPermission;
+  whoCanPost: CommunityPostPermission;
+}
+
+export interface CommunityPermissions {
+  canInvite: boolean;
+  canManageRoles: boolean;
+  canManageSettings: boolean;
+  canManageRequests: boolean;
+  canChangePrivacy: boolean;
+  canTransferOwnership: boolean;
+  canDeleteCommunity: boolean;
+}
+
+export interface CommunityMemberEntry {
+  role: CommunityRole;
+  joinedAt: string;
+  user: User;
+}
+
 export interface CommunitySummary {
   id: string;
   name: string;
@@ -137,17 +164,38 @@ export interface CommunitySummary {
   conversationId: string;
   memberCount: number;
   isMember: boolean;
-  myRole: 'owner' | 'admin' | 'moderator' | 'member' | null;
+  myRole: CommunityRole | null;
   isPending: boolean;
+  pendingRequestsCount?: number;
+  settings?: CommunitySettings;
   createdAt: string;
 }
 
-export interface CommunityDetail extends CommunitySummary {
-  members: Array<{
-    role: 'owner' | 'admin' | 'moderator' | 'member';
-    joinedAt: string;
-    user: User;
-  }>;
+export interface CommunityDetail extends Omit<CommunitySummary, 'conversationId' | 'settings'> {
+  conversationId: string | null;
+  settings: CommunitySettings | null;
+  permissions?: CommunityPermissions;
+  members: CommunityMemberEntry[];
+  pendingRequests: User[];
+}
+
+export interface CommunityMembersResponse {
+  communityId: string;
+  communityName: string;
+  myRole: CommunityRole;
+  counts: {
+    all: number;
+    admins: number;
+    moderators: number;
+    members: number;
+    requests: number;
+  };
+  permissions: {
+    canInvite: boolean;
+    canManageRoles: boolean;
+    canManageRequests: boolean;
+  };
+  members: CommunityMemberEntry[];
   pendingRequests: User[];
 }
 

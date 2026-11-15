@@ -1,16 +1,26 @@
 import { useCallback, useEffect, useState } from 'react';
-import { Lock, MoreVertical, Plus, Search, Users, X } from 'lucide-react';
+import {
+  Info,
+  Lock,
+  MoreVertical,
+  Plus,
+  Search,
+  Users,
+  X,
+} from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 import { DropdownMenu } from '../../components/DropdownMenu';
 import { PrimaryButton } from '../../components/PrimaryButton';
 import { EmptyState, ErrorState, LoadingState } from '../../components/States';
 import { UserAvatar } from '../../components/UserAvatar';
+import { useSocket } from '../../context/SocketContext';
 import { useToast } from '../../context/ToastContext';
 import { communityApi, extractApiError } from '../../services/api';
 import type { CommunitySummary } from '../../types';
 
 export function CommunityPage() {
   const navigate = useNavigate();
+  const { socket } = useSocket();
   const { showToast } = useToast();
 
   const [tab, setTab] = useState<'joined' | 'discover'>('joined');
@@ -41,7 +51,30 @@ export function CommunityPage() {
     return () => clearTimeout(timer);
   }, [loadCommunities]);
 
+  useEffect(() => {
+    if (!socket) return;
+    const refresh = () => loadCommunities();
+    socket.on('community:updated', refresh);
+    socket.on('community:join_request', refresh);
+    socket.on('community:request_resolved', refresh);
+    socket.on('community:invited', refresh);
+    socket.on('community:removed', refresh);
+    socket.on('community:deleted', refresh);
+    return () => {
+      socket.off('community:updated', refresh);
+      socket.off('community:join_request', refresh);
+      socket.off('community:request_resolved', refresh);
+      socket.off('community:invited', refresh);
+      socket.off('community:removed', refresh);
+      socket.off('community:deleted', refresh);
+    };
+  }, [socket, loadCommunities]);
+
   const handleJoin = async (community: CommunitySummary) => {
+    if (community.isMember) {
+      navigate(`/community/${community.id}`);
+      return;
+    }
     setJoiningId(community.id);
     try {
       const res = await communityApi.join(community.id);
@@ -105,16 +138,20 @@ export function CommunityPage() {
       </header>
 
       <div className="max-w-4xl w-full mx-auto flex-1 flex flex-col overflow-hidden px-4 sm:px-6">
-        {searchOpen && (
+        {(searchOpen || tab === 'discover') && (
           <div className="pt-3">
             <div className="relative">
               <Search className="w-4 h-4 text-[#999999] absolute left-3.5 top-1/2 -translate-y-1/2" />
               <input
                 type="text"
-                autoFocus
+                autoFocus={searchOpen}
                 value={query}
                 onChange={(e) => setQuery(e.target.value)}
-                placeholder="Search communities..."
+                placeholder={
+                  tab === 'discover'
+                    ? 'Discover public communities by name or keyword...'
+                    : 'Search your communities...'
+                }
                 className="w-full h-11 rounded-xl bg-[#242424] border border-[#303030] pl-10 pr-10 text-sm text-[#FFFFFF] placeholder:text-[#999999] focus:outline-none"
               />
               {query && (
@@ -143,7 +180,7 @@ export function CommunityPage() {
                   : 'bg-[#202020] text-[#999999] hover:text-[#FFFFFF] hover:bg-[#242424]'
               }`}
             >
-              {t}
+              {t === 'discover' ? 'Discover Communities' : 'Joined'}
             </button>
           ))}
         </div>
@@ -164,7 +201,9 @@ export function CommunityPage() {
               description={
                 tab === 'joined'
                   ? 'Discover public communities or create your own space to collaborate.'
-                  : 'Be the first to create a public community on BlinkUpZ.'
+                  : query
+                    ? 'Try a different keyword or create a new community.'
+                    : 'Be the first to create a public community on BlinkUpZ.'
               }
               actionLabel={tab === 'joined' ? 'Discover Communities' : 'Create Community'}
               onAction={() =>
@@ -179,19 +218,36 @@ export function CommunityPage() {
               >
                 <div
                   className="flex items-start gap-3.5 min-w-0 flex-1 cursor-pointer"
-                  onClick={() => {
-                    if (comm.isMember) navigate(`/community/${comm.id}`);
-                  }}
+                  onClick={() => navigate(`/community/${comm.id}/details`)}
                 >
                   <UserAvatar src={comm.image} name={comm.name} size="lg" />
                   <div className="min-w-0 flex-1">
-                    <div className="flex items-center gap-2">
+                    <div className="flex flex-wrap items-center gap-2">
                       <h2 className="text-base font-semibold text-[#FFFFFF] truncate">
                         {comm.name}
                       </h2>
                       {comm.privacy === 'private' && (
                         <Lock className="w-3.5 h-3.5 text-[#999999] shrink-0" />
                       )}
+                      {comm.isMember && tab === 'discover' && (
+                        <span className="text-[11px] font-medium px-2 py-0.5 rounded-md bg-[#242424] border border-[#303030] text-[#22C55E]">
+                          Joined
+                        </span>
+                      )}
+                      {typeof comm.pendingRequestsCount === 'number' &&
+                        comm.pendingRequestsCount > 0 && (
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              navigate(`/community/${comm.id}/members?tab=requests`);
+                            }}
+                            className="text-[11px] font-medium px-2 py-0.5 rounded-md bg-[#FFFFFF] text-[#181818] cursor-pointer"
+                          >
+                            {comm.pendingRequestsCount} request
+                            {comm.pendingRequestsCount === 1 ? '' : 's'}
+                          </button>
+                        )}
                     </div>
                     {comm.description && (
                       <p className="text-sm text-[#999999] line-clamp-2 mt-0.5">
@@ -216,7 +272,17 @@ export function CommunityPage() {
                   </div>
                 </div>
 
-                <div className="shrink-0 flex justify-end">
+                <div className="shrink-0 flex items-center justify-end gap-2">
+                  <button
+                    type="button"
+                    onClick={() => navigate(`/community/${comm.id}/details`)}
+                    aria-label={`Details for ${comm.name}`}
+                    title="Community details"
+                    className="w-10 h-10 rounded-xl bg-[#242424] border border-[#303030] flex items-center justify-center text-[#999999] hover:text-[#FFFFFF] hover:bg-[#2C2C2C] cursor-pointer"
+                  >
+                    <Info className="w-4 h-4" />
+                  </button>
+
                   {comm.isMember ? (
                     <PrimaryButton
                       variant="secondary"

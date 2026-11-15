@@ -12,7 +12,10 @@ import { CallHistoryPage } from './pages/calls/CallHistoryPage';
 import { ChatsPage } from './pages/chats/ChatsPage';
 import { MessageSearchPage } from './pages/chats/MessageSearchPage';
 import { NewChatPage } from './pages/chats/NewChatPage';
+import { CommunityDetailsPage } from './pages/community/CommunityDetailsPage';
+import { CommunityMembersPage } from './pages/community/CommunityMembersPage';
 import { CommunityPage } from './pages/community/CommunityPage';
+import { CommunitySettingsPage } from './pages/community/CommunitySettingsPage';
 import { CreateCommunityPage } from './pages/community/CreateCommunityPage';
 import { GroupChatPage } from './pages/community/GroupChatPage';
 import { AppSettingsPage } from './pages/profile/AppSettingsPage';
@@ -151,6 +154,30 @@ export default function App() {
                 element={
                   <ProtectedRoute>
                     <GroupChatPage />
+                  </ProtectedRoute>
+                }
+              />
+              <Route
+                path="/community/:communityId/details"
+                element={
+                  <ProtectedRoute>
+                    <CommunityDetailsPage />
+                  </ProtectedRoute>
+                }
+              />
+              <Route
+                path="/community/:communityId/members"
+                element={
+                  <ProtectedRoute>
+                    <CommunityMembersPage />
+                  </ProtectedRoute>
+                }
+              />
+              <Route
+                path="/community/:communityId/settings"
+                element={
+                  <ProtectedRoute>
+                    <CommunitySettingsPage />
                   </ProtectedRoute>
                 }
               />

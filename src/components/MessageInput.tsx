@@ -123,10 +123,10 @@ export function MessageInput({
     if (fileInputRef.current) {
       fileInputRef.current.accept =
         type === 'image'
-          ? 'image/jpeg,image/png,image/webp,image/gif'
+          ? 'image/jpeg,image/png,image/webp,image/gif,image/avif,image/bmp'
           : type === 'video'
-            ? 'video/mp4,video/webm,video/quicktime'
-            : '.pdf,.doc,.docx,.txt,.csv,.zip';
+            ? 'video/mp4,video/webm,video/quicktime,video/3gpp,video/x-matroska,.mkv,.3gp'
+            : '.pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.odt,.ods,.odp,.txt,.csv,.md,.json,.rtf,.zip';
       fileInputRef.current.click();
     }
   };
@@ -142,9 +142,16 @@ export function MessageInput({
       const uploaded = await mediaApi.upload(file, 'messages', (p) =>
         setUploadProgress(p)
       );
+      const mime = (uploaded.mimeType || file.type || '').toLowerCase();
+      let resolvedType: 'image' | 'video' | 'document' | 'voice' = pendingUploadType;
+      if (mime.startsWith('image/')) resolvedType = 'image';
+      else if (mime.startsWith('video/')) resolvedType = 'video';
+      else if (mime.startsWith('audio/')) resolvedType = 'voice';
+      else if (mime) resolvedType = 'document';
+
       await onSendMessage({
         content: text.trim(),
-        messageType: pendingUploadType,
+        messageType: resolvedType,
         attachments: [uploaded],
       });
       setText('');

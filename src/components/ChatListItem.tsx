@@ -75,7 +75,7 @@ export function ChatListItem({
         onTouchStart={handleTouchStart}
         onTouchEnd={clearLongPress}
         onTouchMove={clearLongPress}
-        className={`group relative flex items-center gap-3 px-3.5 py-3 rounded-xl transition-colors duration-150 cursor-pointer ${
+        className={`group relative flex items-center gap-3 px-3 py-3 rounded-xl transition-colors duration-150 cursor-pointer ${
           active ? 'bg-[#242424]' : 'hover:bg-[#202020]'
         }`}
         onClick={onSelect}
@@ -136,7 +136,7 @@ export function ChatListItem({
         </div>
 
         <div
-          className="opacity-0 group-hover:opacity-100 focus-within:opacity-100 transition-opacity shrink-0"
+          className="hidden md:group-hover:block md:group-focus-within:block shrink-0"
           onClick={(e) => e.stopPropagation()}
         >
           <DropdownMenu

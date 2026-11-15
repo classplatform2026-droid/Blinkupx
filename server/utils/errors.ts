@@ -50,6 +50,37 @@ export function errorMiddleware(
   if (
     typeof err === 'object' &&
     err !== null &&
+    'name' in err &&
+    (err as { name?: string }).name === 'MulterError'
+  ) {
+    const multerErr = err as { code?: string; message?: string };
+    const message =
+      multerErr.code === 'LIMIT_FILE_SIZE'
+        ? 'File is too large. Maximum upload size is 25 MB.'
+        : multerErr.message || 'File upload failed.';
+    return res.status(400).json({
+      success: false,
+      code: multerErr.code || 'UPLOAD_ERROR',
+      message,
+    });
+  }
+
+  if (
+    typeof err === 'object' &&
+    err !== null &&
+    'name' in err &&
+    (err as { name?: string }).name === 'CastError'
+  ) {
+    return res.status(400).json({
+      success: false,
+      code: 'INVALID_ID',
+      message: 'Invalid identifier provided.',
+    });
+  }
+
+  if (
+    typeof err === 'object' &&
+    err !== null &&
     'code' in err &&
     (err as { code?: number }).code === 11000
   ) {
