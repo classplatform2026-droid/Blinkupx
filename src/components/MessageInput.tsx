@@ -415,7 +415,7 @@ export function MessageInput({
       }}
       onDragLeave={() => setIsDraggingOver(false)}
       onDrop={handleDrop}
-      className={`border-t border-[#303030] bg-[#181818] px-3 sm:px-5 py-3 shrink-0 transition-colors ${
+      className={`border-t border-[#303030] bg-[#181818] px-3 sm:px-5 pt-3 pb-[calc(1.125rem+env(safe-area-inset-bottom))] sm:pb-3.5 shrink-0 transition-colors ${
         isDraggingOver ? 'bg-[#202020] border-[#FFFFFF]/40' : ''
       }`}
     >

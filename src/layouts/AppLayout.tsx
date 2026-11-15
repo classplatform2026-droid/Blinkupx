@@ -17,7 +17,7 @@ export function AppLayout({ children }: { children: React.ReactNode }) {
       <Sidebar />
       <main
         className={`flex-1 min-w-0 h-full flex flex-col overflow-hidden ${
-          isDetailScreen ? '' : 'pb-16 md:pb-0'
+          isDetailScreen ? '' : 'pb-[calc(4.375rem+env(safe-area-inset-bottom))] md:pb-0'
         }`}
       >
         {children}
