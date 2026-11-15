@@ -1,0 +1,6 @@
+{
+  "name": "BlinkUpZ",
+  "description": "Connect. Communicate. Together. A minimal dark-mode MERN messaging web application for real-time 1:1 chats, communities, and media sharing.",
+  "requestFramePermissions": ["microphone"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
