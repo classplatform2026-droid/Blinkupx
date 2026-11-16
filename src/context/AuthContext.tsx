@@ -1,6 +1,7 @@
 import React, { createContext, useCallback, useContext, useEffect, useState } from 'react';
-import { authApi, clearStoredAuthToken, healthApi, userApi } from '../services/api';
+import { authApi, clearStoredAuthToken, healthApi, pushApi, userApi } from '../services/api';
 import type { ServiceStatus, User } from '../types';
+import { getActiveBrowserPushSubscription, getOrCreatePushDeviceId } from '../utils/pushNotifications';
 
 interface AuthContextValue {
   user: User | null;
@@ -57,6 +58,16 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   const logout = useCallback(async () => {
     try {
+      const existingSub = await getActiveBrowserPushSubscription().catch(() => null);
+      if (existingSub?.endpoint) {
+        await pushApi
+          .unsubscribe({
+            endpoint: existingSub.endpoint,
+            deviceId: getOrCreatePushDeviceId(),
+            disablePreference: false,
+          })
+          .catch(() => {});
+      }
       await authApi.logout();
     } finally {
       clearStoredAuthToken();

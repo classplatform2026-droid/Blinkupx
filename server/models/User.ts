@@ -12,6 +12,7 @@ export interface IUserPrivacySettings {
 }
 
 export interface IUserNotificationSettings {
+  pushEnabled: boolean;
   privateMessages: boolean;
   groupMessages: boolean;
   communityMessages: boolean;
@@ -133,6 +134,7 @@ const userSchema = new Schema<IUser>(
         readReceipts: { type: Boolean, default: true },
       },
       notifications: {
+        pushEnabled: { type: Boolean, default: true },
         privateMessages: { type: Boolean, default: true },
         groupMessages: { type: Boolean, default: true },
         communityMessages: { type: Boolean, default: true },

@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import {
   Ban,
   Bell,
@@ -18,7 +18,18 @@ import { PrimaryButton } from '../../components/PrimaryButton';
 import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
 import { extractApiError, userApi } from '../../services/api';
-import type { UserSettings } from '../../types';
+import type { UserNotificationSettings, UserSettings } from '../../types';
+import {
+  DEFAULT_NOTIFICATION_SETTINGS,
+  getBrowserNotificationState,
+  type BrowserNotificationSupportState,
+} from '../../utils/notifications';
+import {
+  disableBrowserPushSubscription,
+  enableBrowserPushSubscription,
+  getActiveBrowserPushSubscription,
+  isWebPushSupported,
+} from '../../utils/pushNotifications';
 
 export function AppSettingsPage() {
   const navigate = useNavigate();
@@ -26,7 +37,24 @@ export function AppSettingsPage() {
   const { showToast } = useToast();
 
   const [savingKey, setSavingKey] = useState<string | null>(null);
+  const [pushBusy, setPushBusy] = useState(false);
+  const [browserPerm, setBrowserPerm] = useState<BrowserNotificationSupportState>(
+    getBrowserNotificationState
+  );
+  const [deviceSubscribed, setDeviceSubscribed] = useState(false);
   const [infoModal, setInfoModal] = useState<'help' | 'about' | null>(null);
+
+  const webPushSupported = isWebPushSupported();
+
+  const refreshPushState = useCallback(async () => {
+    setBrowserPerm(getBrowserNotificationState());
+    const sub = await getActiveBrowserPushSubscription();
+    setDeviceSubscribed(Boolean(sub));
+  }, []);
+
+  useEffect(() => {
+    refreshPushState();
+  }, [refreshPushState]);
 
   if (!user) return null;
 
@@ -37,6 +65,11 @@ export function AppSettingsPage() {
     typingIndicators: true,
     autoDownloadMedia: true,
     language: 'en',
+  };
+
+  const notifications: UserNotificationSettings = {
+    ...DEFAULT_NOTIFICATION_SETTINGS,
+    ...(user.settings?.notifications || {}),
   };
 
   const updateSetting = async <K extends keyof UserSettings>(
@@ -57,10 +90,75 @@ export function AppSettingsPage() {
     }
   };
 
+  const updateNotificationFields = async (
+    patch: Partial<UserNotificationSettings>,
+    keyLabel: string
+  ) => {
+    setSavingKey(keyLabel);
+    try {
+      const res = await userApi.updateNotifications(patch);
+      setAuthenticatedUser(res.data);
+      window.dispatchEvent(new CustomEvent('blinkupz:push-subscription-changed'));
+      showToast('Notification preference saved.', 'success');
+    } catch (err) {
+      showToast(extractApiError(err).message, 'error');
+    } finally {
+      setSavingKey(null);
+    }
+  };
+
+  const handleTogglePush = async () => {
+    if (!webPushSupported) {
+      showToast('Web Push is not supported in this browser.', 'error');
+      return;
+    }
+
+    const currentlyActive =
+      notifications.pushEnabled && browserPerm === 'granted' && deviceSubscribed;
+
+    setPushBusy(true);
+    try {
+      if (currentlyActive) {
+        const res = await disableBrowserPushSubscription(true);
+        setDeviceSubscribed(false);
+        if (res.user) {
+          setAuthenticatedUser(res.user);
+        }
+        window.dispatchEvent(new CustomEvent('blinkupz:push-subscription-changed'));
+        showToast('Push notifications disabled.', 'info');
+      } else {
+        const res = await enableBrowserPushSubscription(true);
+        setBrowserPerm(res.permission);
+        if (res.permission === 'granted') {
+          setDeviceSubscribed(true);
+          if (res.user) {
+            setAuthenticatedUser(res.user);
+          }
+          window.dispatchEvent(new CustomEvent('blinkupz:push-subscription-changed'));
+          showToast('Push notifications enabled.', 'success');
+        } else if (res.permission === 'denied') {
+          showToast(
+            'Permission blocked in browser settings. Enable notifications in your browser to receive push alerts.',
+            'error'
+          );
+        }
+      }
+    } catch (err) {
+      showToast(extractApiError(err).message, 'error');
+    } finally {
+      setPushBusy(false);
+    }
+  };
+
   const handleClearLocalCache = () => {
     localStorage.removeItem(`blinkupz_recent_searches_${user.id}`);
     showToast('Cleared local search history.', 'success');
   };
+
+  const pushActive =
+    notifications.pushEnabled && browserPerm === 'granted' && deviceSubscribed;
+  const messageNotifsEnabled =
+    notifications.privateMessages || notifications.groupMessages;
 
   return (
     <div className="flex-1 flex flex-col h-full bg-[#181818] overflow-hidden">
@@ -121,15 +219,209 @@ export function AppSettingsPage() {
                 <Bell className="w-4 h-4 text-[#999999]" />
                 <div>
                   <p className="text-sm font-medium text-[#FFFFFF]">
-                    Notifications
+                    Notifications &amp; Devices
                   </p>
                   <p className="text-xs text-[#999999]">
-                    Categories, sound tones, message previews &amp; vibration
+                    Manage subscribed devices, sound tones &amp; vibration
                   </p>
                 </div>
               </div>
               <ChevronRight className="w-4 h-4 text-[#999999]" />
             </button>
+          </section>
+
+          {/* Push & Notification Controls */}
+          <section className="rounded-2xl bg-[#202020] border border-[#303030] p-5 space-y-4">
+            <div className="flex items-center justify-between gap-2">
+              <div className="flex items-center gap-2.5">
+                <Bell className="w-4 h-4 text-[#999999]" />
+                <h2 className="text-sm font-semibold text-[#FFFFFF]">
+                  Push &amp; Notification Preferences
+                </h2>
+              </div>
+              <span className="text-[11px] font-medium text-[#999999]">
+                {browserPerm === 'granted'
+                  ? deviceSubscribed && notifications.pushEnabled
+                    ? 'Active'
+                    : 'Paused'
+                  : browserPerm === 'denied'
+                    ? 'Blocked'
+                    : browserPerm === 'unsupported'
+                      ? 'Unsupported'
+                      : 'Permission needed'}
+              </span>
+            </div>
+
+            {/* Enable / Disable Push Notifications */}
+            <div className="flex items-center justify-between gap-4">
+              <div>
+                <p className="text-sm text-[#FFFFFF]">Push Notifications</p>
+                <p className="text-xs text-[#999999]">
+                  {browserPerm === 'denied'
+                    ? 'Blocked in browser site settings'
+                    : pushActive
+                      ? 'Subscribed on this browser for background alerts'
+                      : 'Receive background alerts when BlinkUpZ is closed'}
+                </p>
+              </div>
+              {webPushSupported && browserPerm !== 'denied' ? (
+                <button
+                  type="button"
+                  role="switch"
+                  aria-label="Push Notifications"
+                  aria-checked={pushActive}
+                  disabled={pushBusy}
+                  onClick={handleTogglePush}
+                  className={`w-11 h-6 rounded-full transition-colors p-0.5 cursor-pointer shrink-0 ${
+                    pushActive ? 'bg-[#22C55E]' : 'bg-[#303030]'
+                  }`}
+                >
+                  <span
+                    className={`block w-5 h-5 rounded-full bg-[#FFFFFF] transition-transform ${
+                      pushActive ? 'translate-x-5' : 'translate-x-0'
+                    }`}
+                  />
+                </button>
+              ) : (
+                <span className="text-xs text-[#999999]">
+                  {browserPerm === 'denied' ? 'Blocked' : 'Unavailable'}
+                </span>
+              )}
+            </div>
+
+            {/* Message Notifications */}
+            <div className="flex items-center justify-between gap-4 pt-3 border-t border-[#303030]">
+              <div>
+                <p className="text-sm text-[#FFFFFF]">Message Notifications</p>
+                <p className="text-xs text-[#999999]">
+                  Direct messages and group chat alerts
+                </p>
+              </div>
+              <button
+                type="button"
+                role="switch"
+                aria-label="Message Notifications"
+                aria-checked={messageNotifsEnabled}
+                disabled={savingKey === 'messageNotifs'}
+                onClick={() =>
+                  updateNotificationFields(
+                    {
+                      privateMessages: !messageNotifsEnabled,
+                      groupMessages: !messageNotifsEnabled,
+                    },
+                    'messageNotifs'
+                  )
+                }
+                className={`w-11 h-6 rounded-full transition-colors p-0.5 cursor-pointer shrink-0 ${
+                  messageNotifsEnabled ? 'bg-[#22C55E]' : 'bg-[#303030]'
+                }`}
+              >
+                <span
+                  className={`block w-5 h-5 rounded-full bg-[#FFFFFF] transition-transform ${
+                    messageNotifsEnabled ? 'translate-x-5' : 'translate-x-0'
+                  }`}
+                />
+              </button>
+            </div>
+
+            {/* Community Notifications */}
+            <div className="flex items-center justify-between gap-4 pt-3 border-t border-[#303030]">
+              <div>
+                <p className="text-sm text-[#FFFFFF]">Community Notifications</p>
+                <p className="text-xs text-[#999999]">
+                  Community channel messages and member activity
+                </p>
+              </div>
+              <button
+                type="button"
+                role="switch"
+                aria-label="Community Notifications"
+                aria-checked={notifications.communityMessages}
+                disabled={savingKey === 'communityNotifs'}
+                onClick={() =>
+                  updateNotificationFields(
+                    {
+                      communityMessages: !notifications.communityMessages,
+                      communityActivity: !notifications.communityMessages,
+                    },
+                    'communityNotifs'
+                  )
+                }
+                className={`w-11 h-6 rounded-full transition-colors p-0.5 cursor-pointer shrink-0 ${
+                  notifications.communityMessages ? 'bg-[#22C55E]' : 'bg-[#303030]'
+                }`}
+              >
+                <span
+                  className={`block w-5 h-5 rounded-full bg-[#FFFFFF] transition-transform ${
+                    notifications.communityMessages ? 'translate-x-5' : 'translate-x-0'
+                  }`}
+                />
+              </button>
+            </div>
+
+            {/* Notification Preview */}
+            <div className="flex items-center justify-between gap-4 pt-3 border-t border-[#303030]">
+              <div>
+                <p className="text-sm text-[#FFFFFF]">Notification Preview</p>
+                <p className="text-xs text-[#999999]">
+                  Show message text inside incoming notifications
+                </p>
+              </div>
+              <button
+                type="button"
+                role="switch"
+                aria-label="Notification Preview"
+                aria-checked={notifications.messagePreview}
+                disabled={savingKey === 'messagePreview'}
+                onClick={() =>
+                  updateNotificationFields(
+                    { messagePreview: !notifications.messagePreview },
+                    'messagePreview'
+                  )
+                }
+                className={`w-11 h-6 rounded-full transition-colors p-0.5 cursor-pointer shrink-0 ${
+                  notifications.messagePreview ? 'bg-[#22C55E]' : 'bg-[#303030]'
+                }`}
+              >
+                <span
+                  className={`block w-5 h-5 rounded-full bg-[#FFFFFF] transition-transform ${
+                    notifications.messagePreview ? 'translate-x-5' : 'translate-x-0'
+                  }`}
+                />
+              </button>
+            </div>
+
+            {/* Notification Sound */}
+            <div className="flex items-center justify-between gap-4 pt-3 border-t border-[#303030]">
+              <div>
+                <p className="text-sm text-[#FFFFFF]">Notification Sound</p>
+                <p className="text-xs text-[#999999]">
+                  Play sound alerts when messages arrive
+                </p>
+              </div>
+              <button
+                type="button"
+                role="switch"
+                aria-label="Notification Sound"
+                aria-checked={notifications.soundEnabled}
+                disabled={savingKey === 'soundEnabled'}
+                onClick={() =>
+                  updateNotificationFields(
+                    { soundEnabled: !notifications.soundEnabled },
+                    'soundEnabled'
+                  )
+                }
+                className={`w-11 h-6 rounded-full transition-colors p-0.5 cursor-pointer shrink-0 ${
+                  notifications.soundEnabled ? 'bg-[#22C55E]' : 'bg-[#303030]'
+                }`}
+              >
+                <span
+                  className={`block w-5 h-5 rounded-full bg-[#FFFFFF] transition-transform ${
+                    notifications.soundEnabled ? 'translate-x-5' : 'translate-x-0'
+                  }`}
+                />
+              </button>
+            </div>
           </section>
 
           {/* Appearance */}
@@ -260,7 +552,7 @@ export function AppSettingsPage() {
           <section className="rounded-2xl bg-[#202020] border border-[#303030] p-5 space-y-4">
             <div className="flex items-center gap-2.5">
               <Database className="w-4 h-4 text-[#999999]" />
-              <h2 className="text-sm font-semibold text-[#FFFFFF]">Storage & Data</h2>
+              <h2 className="text-sm font-semibold text-[#FFFFFF]">Storage &amp; Data</h2>
             </div>
 
             <div className="flex items-center justify-between gap-4">
@@ -316,7 +608,7 @@ export function AppSettingsPage() {
               <div className="flex items-center gap-3">
                 <HelpCircle className="w-4 h-4 text-[#999999]" />
                 <span className="text-sm font-medium text-[#FFFFFF]">
-                  Help & Support
+                  Help &amp; Support
                 </span>
               </div>
               <span className="text-xs text-[#999999]">Service config</span>
@@ -347,7 +639,7 @@ export function AppSettingsPage() {
         {infoModal === 'help' ? (
           <div className="space-y-4 text-sm text-[#999999]">
             <p className="leading-relaxed">
-              BlinkUpZ relies on external service credentials for SMS OTP delivery and Cloudinary media storage. Current server status:
+              BlinkUpZ relies on external service credentials for SMS OTP delivery, Web Push VAPID keys, and Cloudinary media storage. Current server status:
             </p>
             <div className="rounded-xl bg-[#181818] border border-[#303030] p-3.5 space-y-2 text-xs">
               <div className="flex justify-between">
@@ -360,6 +652,12 @@ export function AppSettingsPage() {
                 <span>Cloudinary Media Storage</span>
                 <span className={services?.cloudinary ? 'text-[#22C55E]' : 'text-[#E5484D]'}>
                   {services?.cloudinary ? 'Configured' : 'Needs Env Vars'}
+                </span>
+              </div>
+              <div className="flex justify-between">
+                <span>Web Push Notifications</span>
+                <span className={services?.webPush ? 'text-[#22C55E]' : 'text-[#E5484D]'}>
+                  {services?.webPush ? 'Configured' : 'Needs VAPID Keys'}
                 </span>
               </div>
               <div className="flex justify-between">

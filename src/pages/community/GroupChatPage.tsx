@@ -1,6 +1,8 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ArrowLeft,
+  Bell,
+  BellOff,
   Images,
   Info,
   LogOut,
@@ -557,6 +559,37 @@ export function GroupChatPage() {
                 icon: <Images className="w-4 h-4" />,
                 onClick: () => setSharedMediaOpen((p) => !p),
               },
+              ...(convId && conversation
+                ? [
+                    {
+                      label: conversation.isMuted
+                        ? 'Unmute notifications'
+                        : 'Mute notifications',
+                      icon: conversation.isMuted ? (
+                        <Bell className="w-4 h-4" />
+                      ) : (
+                        <BellOff className="w-4 h-4" />
+                      ),
+                      onClick: async () => {
+                        try {
+                          const next = await conversationApi.updateMeta(
+                            convId,
+                            conversation.isMuted ? 'unmute' : 'mute'
+                          );
+                          setConversation(next);
+                          showToast(
+                            next.isMuted
+                              ? 'Community notifications muted'
+                              : 'Community notifications unmuted',
+                            'success'
+                          );
+                        } catch (err) {
+                          showToast(extractApiError(err).message, 'error');
+                        }
+                      },
+                    },
+                  ]
+                : []),
               ...(!isOwner
                 ? [
                     {

@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useEffect, useRef, useState } from 'react';
+import React, { createContext, useCallback, useContext, useEffect, useRef, useState } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { io, type Socket } from 'socket.io-client';
 import { getStoredAuthToken } from '../services/api';
@@ -9,6 +9,10 @@ import {
   showBrowserNotification,
   triggerNotificationVibration,
 } from '../utils/notifications';
+import {
+  getActiveBrowserPushSubscription,
+  syncBrowserPushSubscriptionIfPermitted,
+} from '../utils/pushNotifications';
 import { useAuth } from './AuthContext';
 import { useToast } from './ToastContext';
 
@@ -33,6 +37,28 @@ const SocketContext = createContext<SocketContextValue>({
   typingMap: {},
 });
 
+function parseFocusedRoute(pathname: string): {
+  conversationId: string | null;
+  communityId: string | null;
+} {
+  const chatMatch = pathname.match(/^\/chats\/([^/]+)$/);
+  if (chatMatch && chatMatch[1] !== 'new' && chatMatch[1] !== 'search') {
+    return { conversationId: chatMatch[1], communityId: null };
+  }
+
+  const communityMatch = pathname.match(/^\/community\/([^/]+)$/);
+  if (communityMatch && communityMatch[1] !== 'create') {
+    return { conversationId: null, communityId: communityMatch[1] };
+  }
+
+  return { conversationId: null, communityId: null };
+}
+
+function getIsPageVisible(): boolean {
+  if (typeof document === 'undefined') return false;
+  return document.visibilityState === 'visible' && document.hasFocus();
+}
+
 export function SocketProvider({ children }: { children: React.ReactNode }) {
   const { user, refreshUser } = useAuth();
   const { showToast } = useToast();
@@ -49,6 +75,8 @@ export function SocketProvider({ children }: { children: React.ReactNode }) {
   const ackedDeliveredIdsRef = useRef<Set<string>>(new Set());
   const userRef = useRef(user);
   const pathnameRef = useRef(location.pathname);
+  const hasActivePushRef = useRef(false);
+  const socketRef = useRef<Socket | null>(null);
 
   useEffect(() => {
     userRef.current = user;
@@ -58,8 +86,95 @@ export function SocketProvider({ children }: { children: React.ReactNode }) {
     pathnameRef.current = location.pathname;
   }, [location.pathname]);
 
+  const emitFocusState = useCallback((targetSocket: Socket | null) => {
+    if (!targetSocket?.connected) return;
+    const { conversationId, communityId } = parseFocusedRoute(pathnameRef.current);
+    targetSocket.emit('conversation:focus', {
+      conversationId,
+      communityId,
+      pageVisible: getIsPageVisible(),
+    });
+  }, []);
+
+  // Re-sync existing granted Web Push subscription silently on login/startup
+  // and refresh local subscription presence without prompting permission.
+  const pushEnabledPref = user?.settings?.notifications?.pushEnabled ?? true;
+
+  useEffect(() => {
+    if (!user?.id) {
+      hasActivePushRef.current = false;
+      return;
+    }
+
+    let cancelled = false;
+
+    const refreshPushState = async () => {
+      await syncBrowserPushSubscriptionIfPermitted(pushEnabledPref);
+      const activeSub = await getActiveBrowserPushSubscription();
+      if (!cancelled) {
+        hasActivePushRef.current = Boolean(activeSub && pushEnabledPref);
+      }
+    };
+
+    refreshPushState();
+
+    const handlePushChanged = () => {
+      getActiveBrowserPushSubscription().then((sub) => {
+        if (!cancelled) {
+          const enabledNow =
+            userRef.current?.settings?.notifications?.pushEnabled ?? true;
+          hasActivePushRef.current = Boolean(sub && enabledNow);
+        }
+      });
+    };
+
+    window.addEventListener('blinkupz:push-subscription-changed', handlePushChanged);
+    return () => {
+      cancelled = true;
+      window.removeEventListener('blinkupz:push-subscription-changed', handlePushChanged);
+    };
+  }, [user?.id, pushEnabledPref]);
+
+  // Handle Service Worker notification click navigation inside SPA
+  useEffect(() => {
+    if (typeof navigator === 'undefined' || !('serviceWorker' in navigator)) {
+      return;
+    }
+
+    const handleSwMessage = (event: MessageEvent) => {
+      const data = event.data as { type?: string; url?: string } | null;
+      if (data?.type === 'BLINKUPZ_NAVIGATE' && typeof data.url === 'string' && data.url.startsWith('/')) {
+        navigate(data.url);
+      }
+    };
+
+    navigator.serviceWorker.addEventListener('message', handleSwMessage);
+    return () => {
+      navigator.serviceWorker.removeEventListener('message', handleSwMessage);
+    };
+  }, [navigate]);
+
+  // Emit conversation focus whenever route or tab visibility/focus changes
+  useEffect(() => {
+    emitFocusState(socketRef.current);
+
+    const handleFocusChange = () => {
+      emitFocusState(socketRef.current);
+    };
+
+    window.addEventListener('focus', handleFocusChange);
+    window.addEventListener('blur', handleFocusChange);
+    document.addEventListener('visibilitychange', handleFocusChange);
+    return () => {
+      window.removeEventListener('focus', handleFocusChange);
+      window.removeEventListener('blur', handleFocusChange);
+      document.removeEventListener('visibilitychange', handleFocusChange);
+    };
+  }, [location.pathname, connected, emitFocusState]);
+
   useEffect(() => {
     if (!user) {
+      socketRef.current = null;
       setSocket((prev) => {
         prev?.disconnect();
         return null;
@@ -79,6 +194,7 @@ export function SocketProvider({ children }: { children: React.ReactNode }) {
       autoConnect: true,
       reconnection: true,
     });
+    socketRef.current = s;
 
     const acknowledgeDelivered = (msg?: Pick<Message, 'id' | 'conversationId' | 'senderId'>) => {
       if (!msg?.id || !msg.conversationId || msg.senderId === user.id) return;
@@ -97,6 +213,7 @@ export function SocketProvider({ children }: { children: React.ReactNode }) {
     s.on('connect', () => {
       setConnected(true);
       s.emit('message:sync_delivered');
+      emitFocusState(s);
     });
 
     s.on('message:new', (msg: Message) => {
@@ -209,10 +326,7 @@ export function SocketProvider({ children }: { children: React.ReactNode }) {
         const viewingThisThread =
           currPath === `/chats/${payload.conversationId}` ||
           Boolean(payload.communityId && currPath === `/community/${payload.communityId}`);
-        const isPageVisible =
-          typeof document !== 'undefined' &&
-          document.visibilityState === 'visible' &&
-          document.hasFocus();
+        const isPageVisible = getIsPageVisible();
 
         if (viewingThisThread && isPageVisible) {
           return;
@@ -230,18 +344,22 @@ export function SocketProvider({ children }: { children: React.ReactNode }) {
         }
 
         if (!isPageVisible) {
-          showBrowserNotification({
-            title: payload.title,
-            body: displayBody,
-            tag: `conv-${payload.conversationId}`,
-            onClick: () => {
-              navigate(
-                payload.communityId
-                  ? `/community/${payload.communityId}`
-                  : `/chats/${payload.conversationId}`
-              );
-            },
-          });
+          // If Web Push is actively subscribed for this browser, /sw.js renders the notification;
+          // avoid duplicating with window.Notification.
+          if (!hasActivePushRef.current) {
+            showBrowserNotification({
+              title: payload.title,
+              body: displayBody,
+              tag: `conv-${payload.conversationId}`,
+              onClick: () => {
+                navigate(
+                  payload.communityId
+                    ? `/community/${payload.communityId}`
+                    : `/chats/${payload.conversationId}`
+                );
+              },
+            });
+          }
         } else {
           showToast(`${payload.title}: ${displayBody}`, 'info');
         }
@@ -271,21 +389,18 @@ export function SocketProvider({ children }: { children: React.ReactNode }) {
           triggerNotificationVibration();
         }
 
-        const isPageVisible =
-          typeof document !== 'undefined' &&
-          document.visibilityState === 'visible' &&
-          document.hasFocus();
-
-        const variant =
-          payload.event === 'invited' ? 'success' : 'info';
+        const isPageVisible = getIsPageVisible();
+        const variant = payload.event === 'invited' ? 'success' : 'info';
 
         if (!isPageVisible) {
-          showBrowserNotification({
-            title: payload.title,
-            body: payload.body,
-            tag: `comm-${payload.communityId}-${payload.event}`,
-            onClick: () => navigate(`/community/${payload.communityId}`),
-          });
+          if (!hasActivePushRef.current) {
+            showBrowserNotification({
+              title: payload.title,
+              body: payload.body,
+              tag: `comm-${payload.communityId}-${payload.event}`,
+              onClick: () => navigate(`/community/${payload.communityId}`),
+            });
+          }
         } else {
           showToast(payload.body, variant);
         }
@@ -308,11 +423,12 @@ export function SocketProvider({ children }: { children: React.ReactNode }) {
     return () => {
       Object.values(typingTimeoutsRef.current).forEach(clearTimeout);
       typingTimeoutsRef.current = {};
+      socketRef.current = null;
       s.disconnect();
       setSocket(null);
       setConnected(false);
     };
-  }, [user?.id, showToast, refreshUser, navigate]);
+  }, [user?.id, showToast, refreshUser, navigate, emitFocusState]);
 
   return (
     <SocketContext.Provider value={{ socket, connected, presenceMap, typingMap }}>

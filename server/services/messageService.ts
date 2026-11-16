@@ -11,6 +11,7 @@ import {
   type PrivacyTargetUserLike,
   type ViewerRelationshipContext,
 } from './privacyService.ts';
+import { dispatchMessagePushNotifications } from './pushService.ts';
 import { AppError } from '../utils/errors.ts';
 import { extractAndFetchLinkPreviews, extractUrlStubs } from '../utils/linkPreview.ts';
 import { resolveUserSettings } from '../utils/serializers.ts';
@@ -304,59 +305,99 @@ export async function createAndDispatchMessage(params: {
 
   if (io) {
     io.to(`conversation:${conv._id.toString()}`).emit('message:new', serialized);
+  }
 
-    const recipients = await User.find({ _id: { $in: otherParticipantIds } })
-      .select('settings blockedUsers')
-      .lean();
+  if (otherParticipantIds.length > 0) {
+    const [recipients, senderDoc] = await Promise.all([
+      User.find({ _id: { $in: otherParticipantIds } })
+        .select('settings blockedUsers')
+        .lean(),
+      User.findById(userId)
+        .select('fullName avatar blockedUsers settings.privacy.profilePhoto')
+        .lean(),
+    ]);
+
     const recipientMap = new Map(recipients.map((r) => [r._id.toString(), r]));
+    const senderBlockedSet = new Set(
+      (senderDoc?.blockedUsers || []).map((id) => id.toString())
+    );
     const now = new Date();
     const resolvedSenderName =
-      senderFullName || serialized.sender?.fullName || 'New message';
+      senderFullName ||
+      senderDoc?.fullName ||
+      serialized.sender?.fullName ||
+      'New message';
 
-    for (const pid of otherParticipantIds) {
-      const recipient = recipientMap.get(pid);
-      const isBlockedRecipient = Boolean(
-        recipient?.blockedUsers?.some((id) => id.toString() === userId)
-      );
-      if (isBlockedRecipient) continue;
-
-      io.to(`user:${pid}`).emit('conversation:activity', {
-        conversationId: conv._id.toString(),
-        message: serialized,
-      });
-
-      const part = conv.participants.find((p) => p.userId.toString() === pid);
-      const isMuted = Boolean(part?.mutedUntil && part.mutedUntil > now);
-      if (isMuted) continue;
-
-      const notif = resolveUserSettings(recipient?.settings).notifications;
-      const categoryEnabled =
-        conv.type === 'direct'
-          ? notif.privateMessages
-          : conv.type === 'group'
-            ? notif.groupMessages
-            : notif.communityMessages;
-
-      if (!categoryEnabled) continue;
-
-      const showPreview = notif.messagePreview;
-      io.to(`user:${pid}`).emit('notification:message', {
-        id: serialized.id,
-        conversationId: conv._id.toString(),
-        conversationType: conv.type,
-        communityId: conv.communityId ? conv.communityId.toString() : null,
-        title:
-          conv.type === 'direct'
-            ? resolvedSenderName
-            : `${resolvedSenderName} • ${conv.name}`,
-        body: showPreview ? previewText.slice(0, 120) : 'New message',
-        previewHidden: !showPreview,
-        soundEnabled: notif.soundEnabled,
-        soundTone: notif.soundTone,
-        vibrationEnabled: notif.vibrationEnabled,
-        createdAt: serialized.createdAt,
-      });
+    const participantMuteMap = new Map<string, Date | null>();
+    for (const part of conv.participants) {
+      participantMuteMap.set(part.userId.toString(), part.mutedUntil || null);
     }
+
+    if (io) {
+      for (const pid of otherParticipantIds) {
+        const recipient = recipientMap.get(pid);
+        const isBlockedRecipient =
+          senderBlockedSet.has(pid) ||
+          Boolean(recipient?.blockedUsers?.some((id) => id.toString() === userId));
+        if (isBlockedRecipient) continue;
+
+        io.to(`user:${pid}`).emit('conversation:activity', {
+          conversationId: conv._id.toString(),
+          message: serialized,
+        });
+
+        const part = conv.participants.find((p) => p.userId.toString() === pid);
+        const isMuted = Boolean(part?.mutedUntil && part.mutedUntil > now);
+        if (isMuted) continue;
+
+        const notif = resolveUserSettings(recipient?.settings).notifications;
+        const categoryEnabled =
+          conv.type === 'direct'
+            ? notif.privateMessages
+            : conv.type === 'group'
+              ? notif.groupMessages
+              : notif.communityMessages;
+
+        if (!categoryEnabled) continue;
+
+        const showPreview = notif.messagePreview;
+        io.to(`user:${pid}`).emit('notification:message', {
+          id: serialized.id,
+          conversationId: conv._id.toString(),
+          conversationType: conv.type,
+          communityId: conv.communityId ? conv.communityId.toString() : null,
+          title:
+            conv.type === 'direct'
+              ? resolvedSenderName
+              : `${resolvedSenderName} • ${conv.name}`,
+          body: showPreview ? previewText.slice(0, 120) : 'New message',
+          previewHidden: !showPreview,
+          soundEnabled: notif.soundEnabled,
+          soundTone: notif.soundTone,
+          vibrationEnabled: notif.vibrationEnabled,
+          createdAt: serialized.createdAt,
+        });
+      }
+    }
+
+    const senderPrivacy = resolveUserSettings(senderDoc?.settings).privacy;
+    void dispatchMessagePushNotifications({
+      messageId: serialized.id,
+      conversationId: conv._id.toString(),
+      conversationType: conv.type,
+      conversationName: conv.name || 'Chat',
+      communityId: conv.communityId ? conv.communityId.toString() : null,
+      senderId: userId,
+      senderName: resolvedSenderName,
+      senderAvatar: senderDoc?.avatar || serialized.sender?.avatar || '',
+      senderProfilePhotoPrivacy: senderPrivacy.profilePhoto,
+      senderBlockedUsers: senderBlockedSet,
+      previewText,
+      recipientDocs: recipients,
+      participantMuteMap,
+    }).catch((err) => {
+      console.error('[Push] Failed to dispatch message push notifications:', err);
+    });
   }
 
   return {

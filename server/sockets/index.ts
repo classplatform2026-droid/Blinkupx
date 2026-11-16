@@ -15,6 +15,15 @@ import { resolveUserSettings } from '../utils/serializers.ts';
 
 let ioInstance: Server | null = null;
 const userSockets = new Map<string, Set<string>>();
+const socketFocusState = new Map<
+  string,
+  {
+    userId: string;
+    conversationId: string | null;
+    communityId: string | null;
+    pageVisible: boolean;
+  }
+>();
 
 function parseCookies(cookieHeader?: string): Record<string, string> {
   const result: Record<string, string> = {};
@@ -36,6 +45,26 @@ export function getIO(): Server | null {
 export function isUserConnected(userId: string): boolean {
   const set = userSockets.get(userId);
   return Boolean(set && set.size > 0);
+}
+
+export function isUserActivelyViewingConversation(
+  userId: string,
+  conversationId: string,
+  communityId?: string | null
+): boolean {
+  const set = userSockets.get(userId);
+  if (!set || set.size === 0) return false;
+  for (const sid of set) {
+    const state = socketFocusState.get(sid);
+    if (!state || !state.pageVisible) continue;
+    if (state.conversationId && state.conversationId === conversationId) {
+      return true;
+    }
+    if (communityId && state.communityId && state.communityId === communityId) {
+      return true;
+    }
+  }
+  return false;
 }
 
 export async function emitPresenceToAuthorizedViewers(targetUserId: string): Promise<void> {
@@ -206,6 +235,28 @@ export function initSocketServer(httpServer: HttpServer): Server {
       if (!payload?.conversationId) return;
       socket.leave(`conversation:${payload.conversationId}`);
     });
+
+    socket.on(
+      'conversation:focus',
+      (payload: {
+        conversationId?: string | null;
+        communityId?: string | null;
+        pageVisible?: boolean;
+      }) => {
+        socketFocusState.set(socket.id, {
+          userId,
+          conversationId:
+            typeof payload?.conversationId === 'string' && payload.conversationId
+              ? payload.conversationId
+              : null,
+          communityId:
+            typeof payload?.communityId === 'string' && payload.communityId
+              ? payload.communityId
+              : null,
+          pageVisible: Boolean(payload?.pageVisible),
+        });
+      }
+    );
 
     socket.on('typing:start', async (payload: { conversationId?: string }) => {
       if (!payload?.conversationId) return;
@@ -629,6 +680,7 @@ export function initSocketServer(httpServer: HttpServer): Server {
     );
 
     socket.on('disconnect', async () => {
+      socketFocusState.delete(socket.id);
       const existing = userSockets.get(userId);
       if (existing) {
         existing.delete(socket.id);

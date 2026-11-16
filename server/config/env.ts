@@ -2,6 +2,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import dotenv from 'dotenv';
+import * as webpush from 'web-push';
 
 dotenv.config();
 
@@ -24,7 +25,37 @@ function getOrCreateFallbackJwtSecret(): string {
   }
 }
 
+function getOrCreateVapidKeys(): { publicKey: string; privateKey: string; fromEnv: boolean } {
+  const envPublic = (process.env.VAPID_PUBLIC_KEY || '').trim().replace(/^["']|["']$/g, '');
+  const envPrivate = (process.env.VAPID_PRIVATE_KEY || '').trim().replace(/^["']|["']$/g, '');
+  if (envPublic && envPrivate) {
+    return { publicKey: envPublic, privateKey: envPrivate, fromEnv: true };
+  }
+
+  const dataDir = path.resolve(process.cwd(), '.data');
+  const vapidFile = path.join(dataDir, '.vapid_keys.json');
+  try {
+    if (fs.existsSync(vapidFile)) {
+      const parsed = JSON.parse(fs.readFileSync(vapidFile, 'utf8')) as {
+        publicKey?: string;
+        privateKey?: string;
+      };
+      if (parsed.publicKey && parsed.privateKey) {
+        return { publicKey: parsed.publicKey, privateKey: parsed.privateKey, fromEnv: false };
+      }
+    }
+    fs.mkdirSync(dataDir, { recursive: true });
+    const generated = webpush.generateVAPIDKeys();
+    fs.writeFileSync(vapidFile, JSON.stringify(generated), { mode: 0o600 });
+    return { ...generated, fromEnv: false };
+  } catch {
+    const generated = webpush.generateVAPIDKeys();
+    return { ...generated, fromEnv: false };
+  }
+}
+
 const runtimeFallbackJwtSecret = process.env.JWT_SECRET ? '' : getOrCreateFallbackJwtSecret();
+const resolvedVapid = getOrCreateVapidKeys();
 
 const detectedOtpProvider = (
   process.env.OTP_PROVIDER ||
@@ -44,6 +75,16 @@ export const env = {
     cloudName: process.env.CLOUDINARY_CLOUD_NAME || '',
     apiKey: process.env.CLOUDINARY_API_KEY || '',
     apiSecret: process.env.CLOUDINARY_API_SECRET || '',
+  },
+  webPush: {
+    publicKey: resolvedVapid.publicKey,
+    privateKey: resolvedVapid.privateKey,
+    subject: (
+      process.env.VAPID_SUBJECT || 'mailto:noreply@blinkupx.zumooflex.shop'
+    )
+      .trim()
+      .replace(/^["']|["']$/g, ''),
+    fromEnv: resolvedVapid.fromEnv,
   },
   otp: {
     provider: detectedOtpProvider,
@@ -67,6 +108,10 @@ export function isCloudinaryConfigured(): boolean {
       env.cloudinary.apiKey &&
       env.cloudinary.apiSecret
   );
+}
+
+export function isWebPushConfigured(): boolean {
+  return Boolean(env.webPush.publicKey && env.webPush.privateKey && env.webPush.subject);
 }
 
 export function isOtpProviderConfigured(): boolean {
@@ -104,6 +149,7 @@ export function getServiceStatus() {
   return {
     database: env.mongodbUri ? 'configured' : 'local-fallback',
     cloudinary: isCloudinaryConfigured(),
+    webPush: isWebPushConfigured(),
     otpProvider: isOtpProviderConfigured(),
     otpProviderType: env.otp.provider,
     missingOtpVars: getMissingOtpVars(),

@@ -17,6 +17,7 @@ import {
   serializeUserWithPrivacy,
   type PrivacyTargetUserLike,
 } from '../services/privacyService.ts';
+import { dispatchCommunityActivityPushNotifications } from '../services/pushService.ts';
 import { getIO } from '../sockets/index.ts';
 import { AppError } from '../utils/errors.ts';
 import { resolveUserSettings } from '../utils/serializers.ts';
@@ -45,24 +46,33 @@ async function emitCommunityActivityNotification(
   }
 ) {
   const io = getIO();
-  if (!io || recipientIds.length === 0) return;
+  if (recipientIds.length === 0) return;
 
   const uniqueIds = Array.from(new Set(recipientIds));
   const users = await User.find({ _id: { $in: uniqueIds } })
     .select('settings')
     .lean();
 
-  for (const u of users) {
-    const notif = resolveUserSettings(u.settings).notifications;
-    if (!notif.communityActivity) continue;
-    io.to(`user:${u._id.toString()}`).emit('notification:community', {
-      ...payload,
-      soundEnabled: notif.soundEnabled,
-      soundTone: notif.soundTone,
-      vibrationEnabled: notif.vibrationEnabled,
-      createdAt: new Date().toISOString(),
-    });
+  if (io) {
+    for (const u of users) {
+      const notif = resolveUserSettings(u.settings).notifications;
+      if (!notif.communityActivity) continue;
+      io.to(`user:${u._id.toString()}`).emit('notification:community', {
+        ...payload,
+        soundEnabled: notif.soundEnabled,
+        soundTone: notif.soundTone,
+        vibrationEnabled: notif.vibrationEnabled,
+        createdAt: new Date().toISOString(),
+      });
+    }
   }
+
+  void dispatchCommunityActivityPushNotifications({
+    ...payload,
+    recipients: users,
+  }).catch((err) => {
+    console.error('[Push] Failed to dispatch community activity push:', err);
+  });
 }
 
 const DEFAULT_SETTINGS: ICommunitySettings = {

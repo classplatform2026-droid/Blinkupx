@@ -13,6 +13,7 @@ export const DEFAULT_PRIVACY_SETTINGS: UserPrivacySettings = {
 };
 
 export const DEFAULT_NOTIFICATION_SETTINGS: UserNotificationSettings = {
+  pushEnabled: true,
   privateMessages: true,
   groupMessages: true,
   communityMessages: true,

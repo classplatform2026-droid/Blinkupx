@@ -10,6 +10,7 @@ export interface UserPrivacySettings {
 }
 
 export interface UserNotificationSettings {
+  pushEnabled: boolean;
   privateMessages: boolean;
   groupMessages: boolean;
   communityMessages: boolean;
@@ -18,6 +19,14 @@ export interface UserNotificationSettings {
   soundTone: NotificationSoundTone;
   messagePreview: boolean;
   vibrationEnabled: boolean;
+}
+
+export interface PushDeviceSubscription {
+  id: string;
+  deviceId: string;
+  deviceLabel: string;
+  lastUsedAt: string;
+  createdAt: string;
 }
 
 export interface UserSettings {
@@ -60,6 +69,7 @@ export interface User {
 export interface ServiceStatus {
   database: string;
   cloudinary: boolean;
+  webPush?: boolean;
   otpProvider: boolean;
   otpProviderType: string;
   missingOtpVars: string[];

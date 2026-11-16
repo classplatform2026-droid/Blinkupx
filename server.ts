@@ -14,6 +14,7 @@ import callRoutes from './server/routes/callRoutes.ts';
 import communityRoutes from './server/routes/communityRoutes.ts';
 import conversationRoutes from './server/routes/conversationRoutes.ts';
 import messageRoutes from './server/routes/messageRoutes.ts';
+import pushRoutes from './server/routes/pushRoutes.ts';
 import searchMediaRoutes from './server/routes/searchMediaRoutes.ts';
 import userRoutes from './server/routes/userRoutes.ts';
 import { initSocketServer } from './server/sockets/index.ts';
@@ -70,6 +71,7 @@ async function bootstrap() {
   app.use('/api/messages', messageRoutes);
   app.use('/api/communities', communityRoutes);
   app.use('/api/calls', callRoutes);
+  app.use('/api/push', pushRoutes);
   app.use('/api', searchMediaRoutes);
 
   app.use('/api', errorMiddleware);

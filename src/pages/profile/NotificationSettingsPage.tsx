@@ -1,9 +1,12 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import {
   Bell,
+  BellOff,
   Eye,
+  Laptop,
   MessageSquare,
   Smartphone,
+  Trash2,
   Users,
   Volume2,
 } from 'lucide-react';
@@ -12,9 +15,10 @@ import { AppHeader } from '../../components/AppHeader';
 import { PrimaryButton } from '../../components/PrimaryButton';
 import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
-import { extractApiError, userApi } from '../../services/api';
+import { extractApiError, pushApi, userApi } from '../../services/api';
 import type {
   NotificationSoundTone,
+  PushDeviceSubscription,
   UserNotificationSettings,
 } from '../../types';
 import {
@@ -22,11 +26,29 @@ import {
   getBrowserNotificationState,
   isVibrationSupported,
   playNotificationTone,
-  requestBrowserNotificationPermission,
   SOUND_TONE_OPTIONS,
   triggerNotificationVibration,
   type BrowserNotificationSupportState,
 } from '../../utils/notifications';
+import {
+  disableBrowserPushSubscription,
+  enableBrowserPushSubscription,
+  getActiveBrowserPushSubscription,
+  getOrCreatePushDeviceId,
+  isWebPushSupported,
+} from '../../utils/pushNotifications';
+
+function formatRelativeDeviceTime(iso?: string): string {
+  if (!iso) return 'Just now';
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return 'Recently';
+  return date.toLocaleString(undefined, {
+    month: 'short',
+    day: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+  });
+}
 
 export function NotificationSettingsPage() {
   const navigate = useNavigate();
@@ -34,20 +56,45 @@ export function NotificationSettingsPage() {
   const { showToast } = useToast();
 
   const [savingKey, setSavingKey] = useState<string | null>(null);
+  const [pushBusy, setPushBusy] = useState(false);
   const [browserPerm, setBrowserPerm] = useState<BrowserNotificationSupportState>(
     getBrowserNotificationState
   );
+  const [deviceSubscribed, setDeviceSubscribed] = useState(false);
+  const [devices, setDevices] = useState<PushDeviceSubscription[]>([]);
+  const [loadingDevices, setLoadingDevices] = useState(true);
+  const [removingDeviceId, setRemovingDeviceId] = useState<string | null>(null);
+
+  const webPushSupported = isWebPushSupported();
   const vibrationSupported = isVibrationSupported();
+  const currentDeviceId = getOrCreatePushDeviceId();
+
+  const loadPushState = useCallback(async () => {
+    setBrowserPerm(getBrowserNotificationState());
+    const [activeSub, listRes] = await Promise.all([
+      getActiveBrowserPushSubscription(),
+      pushApi.listSubscriptions().catch(() => null),
+    ]);
+    setDeviceSubscribed(Boolean(activeSub));
+    if (listRes) {
+      setDevices(listRes);
+    }
+    setLoadingDevices(false);
+  }, []);
 
   useEffect(() => {
-    setBrowserPerm(getBrowserNotificationState());
-  }, []);
+    loadPushState();
+  }, [loadPushState]);
 
   if (!user) return null;
 
   const notifications: UserNotificationSettings = {
     ...DEFAULT_NOTIFICATION_SETTINGS,
     ...(user.settings?.notifications || {}),
+  };
+
+  const notifyPushChanged = () => {
+    window.dispatchEvent(new CustomEvent('blinkupz:push-subscription-changed'));
   };
 
   const updateNotificationField = async <
@@ -60,6 +107,7 @@ export function NotificationSettingsPage() {
     try {
       const res = await userApi.updateNotifications({ [key]: value });
       setAuthenticatedUser(res.data);
+      notifyPushChanged();
       showToast('Notification preference saved.', 'success');
     } catch (err) {
       showToast(extractApiError(err).message, 'error');
@@ -68,16 +116,82 @@ export function NotificationSettingsPage() {
     }
   };
 
-  const handleRequestBrowserPermission = async () => {
-    const next = await requestBrowserNotificationPermission();
-    setBrowserPerm(next);
-    if (next === 'granted') {
-      showToast('Browser notifications enabled.', 'success');
-    } else if (next === 'denied') {
-      showToast(
-        'Browser notifications are blocked in your browser site settings.',
-        'error'
-      );
+  const handleEnablePush = async () => {
+    if (!webPushSupported) {
+      showToast('Web Push is not supported in this browser.', 'error');
+      return;
+    }
+    setPushBusy(true);
+    try {
+      const result = await enableBrowserPushSubscription(true);
+      setBrowserPerm(result.permission);
+      if (result.permission === 'granted') {
+        setDeviceSubscribed(true);
+        setDevices(result.subscriptions);
+        if (result.user) {
+          setAuthenticatedUser(result.user);
+        }
+        notifyPushChanged();
+        showToast('Push notifications enabled for this device.', 'success');
+      } else if (result.permission === 'denied') {
+        showToast(
+          'Notification permission was blocked. Please allow it in browser site settings.',
+          'error'
+        );
+      } else {
+        showToast('Notification permission was dismissed.', 'info');
+      }
+    } catch (err) {
+      showToast(extractApiError(err).message, 'error');
+    } finally {
+      setPushBusy(false);
+    }
+  };
+
+  const handleDisablePush = async (disablePreference = true) => {
+    setPushBusy(true);
+    try {
+      const result = await disableBrowserPushSubscription(disablePreference);
+      setDeviceSubscribed(false);
+      setDevices(result.subscriptions);
+      if (result.user) {
+        setAuthenticatedUser(result.user);
+      }
+      notifyPushChanged();
+      showToast('Push notifications disabled on this device.', 'info');
+    } catch (err) {
+      showToast(extractApiError(err).message, 'error');
+    } finally {
+      setPushBusy(false);
+    }
+  };
+
+  const handleTogglePushMaster = async () => {
+    if (notifications.pushEnabled && deviceSubscribed) {
+      await handleDisablePush(true);
+    } else if (!notifications.pushEnabled && browserPerm === 'granted' && deviceSubscribed) {
+      await updateNotificationField('pushEnabled', true);
+    } else if (notifications.pushEnabled && !deviceSubscribed) {
+      await handleEnablePush();
+    } else {
+      await handleEnablePush();
+    }
+  };
+
+  const handleRemoveDevice = async (sub: PushDeviceSubscription) => {
+    setRemovingDeviceId(sub.id);
+    try {
+      if (sub.deviceId === currentDeviceId) {
+        await handleDisablePush(false);
+      } else {
+        const res = await pushApi.removeSubscriptionById(sub.id);
+        setDevices(res.data);
+        showToast('Device subscription removed.', 'success');
+      }
+    } catch (err) {
+      showToast(extractApiError(err).message, 'error');
+    } finally {
+      setRemovingDeviceId(null);
     }
   };
 
@@ -112,6 +226,22 @@ export function NotificationSettingsPage() {
     },
   ];
 
+  const permissionBadge =
+    !webPushSupported || browserPerm === 'unsupported'
+      ? { label: 'Unsupported', tone: 'text-[#999999] bg-[#242424] border-[#303030]' }
+      : browserPerm === 'granted' && deviceSubscribed && notifications.pushEnabled
+        ? { label: 'Active', tone: 'text-[#22C55E] bg-[#22C55E]/10 border-[#22C55E]/30' }
+        : browserPerm === 'granted' && !notifications.pushEnabled
+          ? { label: 'Paused', tone: 'text-[#999999] bg-[#242424] border-[#303030]' }
+          : browserPerm === 'granted'
+            ? { label: 'Permitted · Off on device', tone: 'text-[#999999] bg-[#242424] border-[#303030]' }
+            : browserPerm === 'denied'
+              ? { label: 'Blocked in browser', tone: 'text-[#E5484D] bg-[#E5484D]/10 border-[#E5484D]/30' }
+              : { label: 'Not enabled', tone: 'text-[#999999] bg-[#242424] border-[#303030]' };
+
+  const masterSwitchOn =
+    notifications.pushEnabled && browserPerm === 'granted' && deviceSubscribed;
+
   return (
     <div className="flex-1 flex flex-col h-full bg-[#181818] overflow-hidden">
       <AppHeader
@@ -122,6 +252,161 @@ export function NotificationSettingsPage() {
 
       <div className="flex-1 overflow-y-auto px-4 sm:px-6 py-6">
         <div className="max-w-2xl mx-auto space-y-6">
+          {/* Web Push Master Control & Permission */}
+          <section className="rounded-2xl bg-[#202020] border border-[#303030] p-5 space-y-4">
+            <div className="flex items-start justify-between gap-4">
+              <div className="flex items-start gap-2.5">
+                {masterSwitchOn ? (
+                  <Bell className="w-4 h-4 text-[#22C55E] mt-0.5 shrink-0" />
+                ) : (
+                  <BellOff className="w-4 h-4 text-[#999999] mt-0.5 shrink-0" />
+                )}
+                <div>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <h2 className="text-sm font-semibold text-[#FFFFFF]">
+                      Web Push Notifications
+                    </h2>
+                    <span
+                      className={`text-[11px] font-medium px-2 py-0.5 rounded-md border ${permissionBadge.tone}`}
+                    >
+                      {permissionBadge.label}
+                    </span>
+                  </div>
+                  <p className="text-xs text-[#999999] mt-1 leading-relaxed">
+                    {!webPushSupported
+                      ? 'This browser does not support Service Worker Web Push notifications.'
+                      : browserPerm === 'denied'
+                        ? 'Notifications are blocked in your browser site settings. Re-enable permission there to receive push alerts.'
+                        : masterSwitchOn
+                          ? 'Receiving real-time background alerts even when BlinkUpZ is minimized or closed.'
+                          : 'Enable push notifications to receive direct, group, and community alerts when away.'}
+                  </p>
+                </div>
+              </div>
+
+              {webPushSupported && browserPerm !== 'denied' && (
+                <button
+                  type="button"
+                  role="switch"
+                  aria-label="Enable Push Notifications"
+                  aria-checked={masterSwitchOn}
+                  disabled={pushBusy || savingKey === 'pushEnabled'}
+                  onClick={handleTogglePushMaster}
+                  className={`w-11 h-6 rounded-full transition-colors p-0.5 cursor-pointer shrink-0 ${
+                    masterSwitchOn ? 'bg-[#22C55E]' : 'bg-[#303030]'
+                  }`}
+                >
+                  <span
+                    className={`block w-5 h-5 rounded-full bg-[#FFFFFF] transition-transform ${
+                      masterSwitchOn ? 'translate-x-5' : 'translate-x-0'
+                    }`}
+                  />
+                </button>
+              )}
+            </div>
+
+            {webPushSupported && browserPerm !== 'denied' && (
+              <div className="flex flex-wrap items-center justify-between gap-3 pt-3 border-t border-[#303030]">
+                <div className="text-xs text-[#999999]">
+                  Browser permission:{' '}
+                  <span className="text-[#FFFFFF] font-medium capitalize">
+                    {browserPerm}
+                  </span>
+                  {' · '}
+                  This device:{' '}
+                  <span className="text-[#FFFFFF] font-medium">
+                    {deviceSubscribed ? 'Subscribed' : 'Not subscribed'}
+                  </span>
+                </div>
+
+                {!masterSwitchOn ? (
+                  <PrimaryButton
+                    variant="secondary"
+                    loading={pushBusy}
+                    onClick={handleEnablePush}
+                    className="min-h-[36px] py-1.5 px-3.5 text-xs shrink-0"
+                  >
+                    Enable Notifications
+                  </PrimaryButton>
+                ) : (
+                  <PrimaryButton
+                    variant="secondary"
+                    loading={pushBusy}
+                    onClick={() => handleDisablePush(true)}
+                    className="min-h-[36px] py-1.5 px-3.5 text-xs shrink-0"
+                  >
+                    Disable on Device
+                  </PrimaryButton>
+                )}
+              </div>
+            )}
+          </section>
+
+          {/* Registered Devices */}
+          <section className="rounded-2xl bg-[#202020] border border-[#303030] p-5 space-y-3.5">
+            <div className="flex items-center justify-between gap-2">
+              <div className="flex items-center gap-2.5">
+                <Laptop className="w-4 h-4 text-[#999999]" />
+                <div>
+                  <h2 className="text-sm font-semibold text-[#FFFFFF]">
+                    Subscribed Devices
+                  </h2>
+                  <p className="text-xs text-[#999999]">
+                    Manage browsers receiving push notifications for your account
+                  </p>
+                </div>
+              </div>
+              <span className="text-xs font-mono text-[#999999]">
+                {devices.length}
+              </span>
+            </div>
+
+            {loadingDevices ? (
+              <p className="text-xs text-[#999999]">Loading devices...</p>
+            ) : devices.length === 0 ? (
+              <p className="text-xs text-[#999999]">
+                No browsers are currently subscribed to push notifications.
+              </p>
+            ) : (
+              <div className="divide-y divide-[#303030]">
+                {devices.map((sub) => {
+                  const isCurrent = sub.deviceId === currentDeviceId;
+                  return (
+                    <div
+                      key={sub.id}
+                      className="flex items-center justify-between gap-3 py-3 first:pt-1 last:pb-0"
+                    >
+                      <div className="min-w-0">
+                        <div className="flex items-center gap-2">
+                          <p className="text-sm font-medium text-[#FFFFFF] truncate">
+                            {sub.deviceLabel}
+                          </p>
+                          {isCurrent && (
+                            <span className="text-[10px] font-medium px-1.5 py-0.5 rounded bg-[#242424] border border-[#303030] text-[#22C55E] shrink-0">
+                              This device
+                            </span>
+                          )}
+                        </div>
+                        <p className="text-xs text-[#999999] mt-0.5">
+                          Last active {formatRelativeDeviceTime(sub.lastUsedAt)}
+                        </p>
+                      </div>
+                      <button
+                        type="button"
+                        disabled={removingDeviceId === sub.id || pushBusy}
+                        onClick={() => handleRemoveDevice(sub)}
+                        aria-label={`Remove ${sub.deviceLabel}`}
+                        className="p-2 rounded-lg text-[#999999] hover:text-[#E5484D] hover:bg-[#242424] cursor-pointer transition-colors shrink-0"
+                      >
+                        <Trash2 className="w-4 h-4" />
+                      </button>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </section>
+
           {/* Categories */}
           <section className="rounded-2xl bg-[#202020] border border-[#303030] p-5 space-y-4">
             <div className="flex items-center gap-2.5">
@@ -131,7 +416,7 @@ export function NotificationSettingsPage() {
                   Notification Categories
                 </h2>
                 <p className="text-xs text-[#999999]">
-                  Disabled categories will not trigger alert sounds or popups. You can also mute individual conversations from the chat menu.
+                  Disabled categories will not trigger alert sounds, popups, or Web Push alerts.
                 </p>
               </div>
             </div>
@@ -177,7 +462,7 @@ export function NotificationSettingsPage() {
             <div className="flex items-center gap-2.5">
               <Volume2 className="w-4 h-4 text-[#999999]" />
               <h2 className="text-sm font-semibold text-[#FFFFFF]">
-                Sound, Vibration & Previews
+                Sound, Vibration &amp; Previews
               </h2>
             </div>
 
@@ -273,17 +558,17 @@ export function NotificationSettingsPage() {
                 <Eye className="w-4 h-4 text-[#999999] mt-0.5 shrink-0" />
                 <div>
                   <p className="text-sm font-medium text-[#FFFFFF]">
-                    Message Preview
+                    Notification Preview
                   </p>
                   <p className="text-xs text-[#999999]">
-                    Show message text inside incoming notification alerts. When off, only the sender name and &ldquo;New message&rdquo; are shown.
+                    Show message text inside incoming alerts. When off, only the sender name and &ldquo;New message&rdquo; are shown.
                   </p>
                 </div>
               </div>
               <button
                 type="button"
                 role="switch"
-                aria-label="Message Preview"
+                aria-label="Notification Preview"
                 aria-checked={notifications.messagePreview}
                 disabled={savingKey === 'messagePreview'}
                 onClick={() =>
@@ -347,48 +632,10 @@ export function NotificationSettingsPage() {
             </div>
           </section>
 
-          {/* Browser Notification Permission */}
-          <section className="rounded-2xl bg-[#202020] border border-[#303030] p-5 space-y-3">
-            <div className="flex items-center justify-between gap-4">
-              <div className="flex items-start gap-2.5">
-                <Bell className="w-4 h-4 text-[#999999] mt-0.5 shrink-0" />
-                <div>
-                  <p className="text-sm font-semibold text-[#FFFFFF]">
-                    Browser Notifications
-                  </p>
-                  <p className="text-xs text-[#999999] mt-0.5">
-                    {browserPerm === 'granted'
-                      ? 'Permission granted. Background alerts will appear through your browser.'
-                      : browserPerm === 'denied'
-                        ? 'Permission denied in your browser settings. In-app notifications will still appear while BlinkUpZ is open.'
-                        : browserPerm === 'unsupported'
-                          ? 'This browser does not support desktop or system Web Notifications.'
-                          : 'Allow browser alerts to receive notifications when BlinkUpZ is in the background.'}
-                  </p>
-                </div>
-              </div>
-
-              {browserPerm === 'default' && (
-                <PrimaryButton
-                  variant="secondary"
-                  onClick={handleRequestBrowserPermission}
-                  className="min-h-[36px] py-1.5 px-3 text-xs shrink-0"
-                >
-                  Enable
-                </PrimaryButton>
-              )}
-              {browserPerm === 'granted' && (
-                <span className="text-xs font-medium text-[#22C55E] shrink-0">
-                  Allowed
-                </span>
-              )}
-            </div>
-          </section>
-
           <div className="flex items-center gap-2 text-xs text-[#999999] px-1">
             <Users className="w-3.5 h-3.5 shrink-0" />
             <span>
-              Individual chat mute settings override sound and popup alerts for that conversation.
+              Individual chat and community mute settings override sound, popups, and Web Push alerts for that conversation.
             </span>
           </div>
         </div>

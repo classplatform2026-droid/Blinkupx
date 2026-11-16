@@ -70,6 +70,7 @@ export const privacySettingsSchema = z.object({
 });
 
 export const notificationSettingsSchema = z.object({
+  pushEnabled: z.boolean().optional(),
   privateMessages: z.boolean().optional(),
   groupMessages: z.boolean().optional(),
   communityMessages: z.boolean().optional(),
@@ -78,6 +79,32 @@ export const notificationSettingsSchema = z.object({
   soundTone: soundToneSchema.optional(),
   messagePreview: z.boolean().optional(),
   vibrationEnabled: z.boolean().optional(),
+});
+
+export const pushSubscribeSchema = z.object({
+  subscription: z.object({
+    endpoint: z
+      .string()
+      .trim()
+      .url('Valid push subscription endpoint URL is required')
+      .refine((url) => url.startsWith('https://'), {
+        message: 'Push subscription endpoint must use HTTPS',
+      }),
+    expirationTime: z.number().nullable().optional(),
+    keys: z.object({
+      p256dh: z.string().trim().min(16, 'Valid p256dh key is required').max(512),
+      auth: z.string().trim().min(8, 'Valid auth secret is required').max(256),
+    }),
+  }),
+  deviceId: z.string().trim().max(128).optional().default(''),
+  deviceLabel: z.string().trim().max(100).optional().default(''),
+  enablePreference: z.boolean().optional().default(true),
+});
+
+export const pushUnsubscribeSchema = z.object({
+  endpoint: z.string().trim().url().optional(),
+  deviceId: z.string().trim().max(128).optional(),
+  disablePreference: z.boolean().optional().default(false),
 });
 
 export const updateProfileSchema = z.object({

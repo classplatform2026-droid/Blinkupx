@@ -18,6 +18,7 @@ export function resolveUserSettings(raw?: Partial<IUserSettings> | null): IUserS
   };
 
   const notifications: IUserNotificationSettings = {
+    pushEnabled: raw?.notifications?.pushEnabled ?? true,
     privateMessages: raw?.notifications?.privateMessages ?? true,
     groupMessages: raw?.notifications?.groupMessages ?? true,
     communityMessages: raw?.notifications?.communityMessages ?? true,

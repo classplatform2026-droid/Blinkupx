@@ -9,6 +9,7 @@ import type {
   Message,
   MessageAttachment,
   MyQrCodeData,
+  PushDeviceSubscription,
   SearchResults,
   ServiceStatus,
   SharedMediaResponse,
@@ -281,6 +282,76 @@ export const userApi = {
       message: string;
       data: { user: User | null };
     }>(`/users/block/${encodeURIComponent(userId)}`);
+    return res.data;
+  },
+};
+
+export const pushApi = {
+  getVapidPublicKey: async () => {
+    const res = await api.get<{
+      success: boolean;
+      data: { publicKey: string };
+    }>('/push/vapid-public-key');
+    return res.data.data.publicKey;
+  },
+  listSubscriptions: async () => {
+    const res = await api.get<{
+      success: boolean;
+      data: PushDeviceSubscription[];
+    }>('/push/subscriptions');
+    return res.data.data;
+  },
+  subscribe: async (payload: {
+    subscription: {
+      endpoint: string;
+      expirationTime?: number | null;
+      keys: { p256dh: string; auth: string };
+    };
+    deviceId: string;
+    deviceLabel: string;
+    enablePreference?: boolean;
+  }) => {
+    const res = await api.post<{
+      success: boolean;
+      message: string;
+      data: {
+        subscription: PushDeviceSubscription;
+        subscriptions: PushDeviceSubscription[];
+        user?: User;
+      };
+    }>('/push/subscribe', payload);
+    return res.data;
+  },
+  unsubscribe: async (payload: {
+    endpoint?: string;
+    deviceId?: string;
+    disablePreference?: boolean;
+  }) => {
+    const res = await api.post<{
+      success: boolean;
+      message: string;
+      data: {
+        removedCount: number;
+        subscriptions: PushDeviceSubscription[];
+        user?: User;
+      };
+    }>('/push/unsubscribe', payload);
+    return res.data;
+  },
+  removeSubscriptionById: async (subscriptionId: string) => {
+    const res = await api.delete<{
+      success: boolean;
+      message: string;
+      data: PushDeviceSubscription[];
+    }>(`/push/subscriptions/${encodeURIComponent(subscriptionId)}`);
+    return res.data;
+  },
+  updatePreferences: async (payload: Partial<UserNotificationSettings>) => {
+    const res = await api.patch<{
+      success: boolean;
+      message: string;
+      data: User;
+    }>('/push/preferences', payload);
     return res.data;
   },
 };
