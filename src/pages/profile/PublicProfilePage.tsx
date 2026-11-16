@@ -18,12 +18,18 @@ import { PrimaryButton } from '../../components/PrimaryButton';
 import { QrCodeModal } from '../../components/QrCodeModal';
 import { ErrorState, LoadingState } from '../../components/States';
 import { UserAvatar } from '../../components/UserAvatar';
+import { useQueryClient } from '@tanstack/react-query';
 import { useAuth } from '../../context/AuthContext';
 import { useSocket } from '../../context/SocketContext';
 import { useToast } from '../../context/ToastContext';
 import { conversationApi, extractApiError, userApi } from '../../services/api';
 import type { User } from '../../types';
 import { formatLastSeen } from '../../utils/formatters';
+import {
+  getCachedProfileByUsername,
+  saveCachedProfile,
+} from '../../utils/indexedDb';
+import { CACHE_TIMES, queryKeys } from '../../utils/queryClient';
 
 export function PublicProfilePage() {
   const { username = '' } = useParams<{ username: string }>();
@@ -31,6 +37,8 @@ export function PublicProfilePage() {
   const { user: currentUser, setAuthenticatedUser } = useAuth();
   const { presenceMap } = useSocket();
   const { showToast } = useToast();
+  const qc = useQueryClient();
+  const viewerId = currentUser?.id || '';
 
   const [profile, setProfile] = useState<User | null>(null);
   const [loading, setLoading] = useState(true);
@@ -42,20 +50,44 @@ export function PublicProfilePage() {
   const [blockingBusy, setBlockingBusy] = useState(false);
 
   const loadProfile = useCallback(async () => {
-    setLoading(true);
     setError(null);
+    let hydrated = false;
+
+    if (viewerId) {
+      const mem = qc.getQueryData<User>(queryKeys.publicProfile(viewerId, username));
+      const cached = mem || (await getCachedProfileByUsername(viewerId, username));
+      if (cached) {
+        setProfile(cached);
+        hydrated = true;
+        setLoading(false);
+      }
+    }
+
+    if (!hydrated) {
+      setLoading(true);
+    }
+
     try {
-      const data = await userApi.getPublicByUsername(username);
+      const data = await qc.fetchQuery({
+        queryKey: queryKeys.publicProfile(viewerId || 'anon', username),
+        staleTime: CACHE_TIMES.profile.staleTime,
+        queryFn: () => userApi.getPublicByUsername(username),
+      });
       setProfile(data);
+      if (viewerId) {
+        void saveCachedProfile(viewerId, data);
+      }
     } catch (err) {
-      setError(extractApiError(err).message);
+      if (!hydrated) {
+        setError(extractApiError(err).message);
+      }
     } finally {
       setLoading(false);
     }
-  }, [username]);
+  }, [username, viewerId, qc]);
 
   useEffect(() => {
-    loadProfile();
+    void loadProfile();
   }, [loadProfile]);
 
   useEffect(() => {

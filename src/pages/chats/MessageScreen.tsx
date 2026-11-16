@@ -28,6 +28,7 @@ import { useAuth } from '../../context/AuthContext';
 import { useSocket } from '../../context/SocketContext';
 import { useToast } from '../../context/ToastContext';
 import { useOptimisticChatSender } from '../../hooks/useOptimisticChatSender';
+import { useQueryClient } from '@tanstack/react-query';
 import {
   conversationApi,
   extractApiError,
@@ -36,7 +37,24 @@ import {
 } from '../../services/api';
 import type { Conversation, Message, MessageLinkPreview } from '../../types';
 import { formatDateSeparator, formatLastSeen } from '../../utils/formatters';
+import {
+  getCachedConversationById,
+  getCachedMessages,
+  getPendingOutgoingMessages,
+  saveCachedConversation,
+  saveCachedMessages,
+} from '../../utils/indexedDb';
+import { hydratePendingMessagesForUi } from '../../utils/offlineQueue';
 import { reconcileIncomingMessage } from '../../utils/optimisticMessages';
+import {
+  CACHE_TIMES,
+  queryKeys,
+  removeConversationFromCaches,
+  syncMessageDeleteCaches,
+  syncMessageEditCaches,
+  syncReactionCaches,
+  type ThreadMessagesCacheData,
+} from '../../utils/queryClient';
 
 export function MessageScreen({ conversationId }: { conversationId: string }) {
   const navigate = useNavigate();
@@ -46,6 +64,8 @@ export function MessageScreen({ conversationId }: { conversationId: string }) {
   const { user, setAuthenticatedUser } = useAuth();
   const { socket, presenceMap, typingMap } = useSocket();
   const { showToast } = useToast();
+  const qc = useQueryClient();
+  const userId = user?.id || '';
 
   const [conversation, setConversation] = useState<Conversation | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
@@ -102,17 +122,92 @@ export function MessageScreen({ conversationId }: { conversationId: string }) {
 
   const loadThread = useCallback(async () => {
     setError(null);
-    setLoading(true);
+    let hydrated = false;
+
+    // 1. Instant hydration from TanStack Query + IndexedDB + Pending Queue
+    if (userId && !highlightId) {
+      const memConv = qc.getQueryData<Conversation>(
+        queryKeys.conversation(userId, conversationId)
+      );
+      const memMsgs = qc.getQueryData<ThreadMessagesCacheData>(
+        queryKeys.messages(userId, conversationId)
+      );
+
+      const [idbConv, idbMsgs, pendingRecs] = await Promise.all([
+        memConv ? Promise.resolve(memConv) : getCachedConversationById(userId, conversationId),
+        memMsgs ? Promise.resolve(null) : getCachedMessages(userId, conversationId, 60),
+        getPendingOutgoingMessages(userId, conversationId),
+      ]);
+
+      const pendingUi = hydratePendingMessagesForUi(pendingRecs);
+
+      if (memConv || idbConv) {
+        setConversation(memConv || idbConv);
+        hydrated = true;
+        setLoading(false);
+      }
+
+      const baseMsgs = memMsgs?.messages || idbMsgs || [];
+      if (baseMsgs.length > 0 || pendingUi.length > 0) {
+        let merged = [...baseMsgs];
+        for (const p of pendingUi) {
+          merged = reconcileIncomingMessage(merged, p);
+        }
+        setMessages(merged);
+        if (memMsgs) {
+          setHasMore(memMsgs.hasMore);
+          setHasNewerMessages(Boolean(memMsgs.hasNewer));
+        }
+        hydrated = Boolean(memConv || idbConv || merged.length > 0);
+        setLoading(false);
+      }
+    }
+
+    if (!hydrated) {
+      setLoading(true);
+    }
+
+    // 2. Fetch fresh data from server (respecting staleTime if offline or returning quickly)
     try {
-      const convData = await conversationApi.getById(conversationId);
-      const msgData = highlightId
-        ? await messageApi.getAround(conversationId, highlightId).catch(() => messageApi.list(conversationId))
-        : await messageApi.list(conversationId);
+      const [convData, msgData, pendingRecs] = await Promise.all([
+        qc.fetchQuery({
+          queryKey: queryKeys.conversation(userId || 'anon', conversationId),
+          staleTime: CACHE_TIMES.conversationDetail.staleTime,
+          queryFn: () => conversationApi.getById(conversationId),
+        }),
+        highlightId
+          ? messageApi
+              .getAround(conversationId, highlightId)
+              .catch(() => messageApi.list(conversationId))
+          : messageApi.list(conversationId),
+        userId ? getPendingOutgoingMessages(userId, conversationId) : Promise.resolve([]),
+      ]);
+
+      let mergedMsgs = [...msgData.messages];
+      for (const p of hydratePendingMessagesForUi(pendingRecs)) {
+        mergedMsgs = reconcileIncomingMessage(mergedMsgs, p);
+      }
 
       setConversation(convData);
-      setMessages(msgData.messages);
+      setMessages(mergedMsgs);
       setHasMore(msgData.hasMore);
       setHasNewerMessages(Boolean('hasNewer' in msgData && msgData.hasNewer));
+
+      if (userId) {
+        void saveCachedConversation(userId, convData);
+        if (!highlightId) {
+          void saveCachedMessages(userId, msgData.messages);
+          qc.setQueryData<ThreadMessagesCacheData>(
+            queryKeys.messages(userId, conversationId),
+            {
+              messages: mergedMsgs,
+              hasMore: msgData.hasMore,
+              hasNewer: Boolean('hasNewer' in msgData && msgData.hasNewer),
+            }
+          );
+        }
+      }
+
       if (highlightId) {
         setPendingScrollId(highlightId);
         setJumpedMessageId(highlightId);
@@ -121,14 +216,16 @@ export function MessageScreen({ conversationId }: { conversationId: string }) {
       socket?.emit('group:join', { conversationId });
       emitReadIfVisible();
     } catch (err) {
-      setError(extractApiError(err).message);
+      if (!hydrated) {
+        setError(extractApiError(err).message);
+      }
     } finally {
       setLoading(false);
     }
-  }, [conversationId, highlightId, socket, emitReadIfVisible]);
+  }, [conversationId, highlightId, socket, emitReadIfVisible, userId, qc]);
 
   useEffect(() => {
-    loadThread();
+    void loadThread();
   }, [loadThread]);
 
   useEffect(() => {
@@ -333,8 +430,20 @@ export function MessageScreen({ conversationId }: { conversationId: string }) {
     try {
       const oldest = messages[0].createdAt;
       const data = await messageApi.list(conversationId, oldest);
-      setMessages((prev) => [...data.messages, ...prev]);
+      setMessages((prev) => {
+        const merged = [...data.messages, ...prev];
+        if (userId && !hasNewerMessages) {
+          qc.setQueryData<ThreadMessagesCacheData>(
+            queryKeys.messages(userId, conversationId),
+            { messages: merged, hasMore: data.hasMore, hasNewer: false }
+          );
+        }
+        return merged;
+      });
       setHasMore(data.hasMore);
+      if (userId) {
+        void saveCachedMessages(userId, data.messages);
+      }
       requestAnimationFrame(() => {
         if (container) {
           container.scrollTop = container.scrollHeight - prevHeight;
@@ -361,6 +470,9 @@ export function MessageScreen({ conversationId }: { conversationId: string }) {
     const updated = await messageApi.edit(messageId, content, attachmentCaptions);
     setEditingMessage(null);
     setMessages((prev) => prev.map((m) => (m.id === updated.id ? updated : m)));
+    if (userId) {
+      syncMessageEditCaches(userId, updated);
+    }
     window.dispatchEvent(
       new CustomEvent('blinkupz:shared-media-refresh', { detail: { conversationId } })
     );
@@ -369,6 +481,7 @@ export function MessageScreen({ conversationId }: { conversationId: string }) {
   const handleDeleteMessage = async (msg: Message, scope: 'everyone' | 'me') => {
     try {
       await messageApi.delete(msg.id, scope);
+      const deletedAt = new Date().toISOString();
       if (scope === 'me') {
         setMessages((prev) => prev.filter((m) => m.id !== msg.id));
       } else {
@@ -377,7 +490,7 @@ export function MessageScreen({ conversationId }: { conversationId: string }) {
             m.id === msg.id
               ? {
                   ...m,
-                  deletedAt: new Date().toISOString(),
+                  deletedAt,
                   content: 'This message was deleted',
                   attachments: [],
                   reactions: [],
@@ -385,6 +498,14 @@ export function MessageScreen({ conversationId }: { conversationId: string }) {
               : m
           )
         );
+      }
+      if (userId) {
+        syncMessageDeleteCaches(userId, {
+          id: msg.id,
+          conversationId,
+          deletedAt,
+          scope,
+        });
       }
       window.dispatchEvent(
         new CustomEvent('blinkupz:shared-media-refresh', { detail: { conversationId } })
@@ -402,6 +523,13 @@ export function MessageScreen({ conversationId }: { conversationId: string }) {
           m.id === msg.id ? { ...m, reactions: res.reactions } : m
         )
       );
+      if (userId) {
+        syncReactionCaches(userId, {
+          messageId: msg.id,
+          conversationId,
+          reactions: res.reactions,
+        });
+      }
     } catch (err) {
       showToast(extractApiError(err).message, 'error');
     }
@@ -726,6 +854,9 @@ export function MessageScreen({ conversationId }: { conversationId: string }) {
                 danger: true,
                 onClick: async () => {
                   await conversationApi.delete(conversation.id);
+                  if (userId) {
+                    removeConversationFromCaches(userId, conversation.id);
+                  }
                   showToast('Conversation removed.', 'info');
                   navigate('/chats', { replace: true });
                 },

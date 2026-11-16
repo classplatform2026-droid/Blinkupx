@@ -17,50 +17,104 @@ import { Modal } from '../../components/Modal';
 import { PrimaryButton } from '../../components/PrimaryButton';
 import { EmptyState, ErrorState, LoadingState } from '../../components/States';
 import { UserAvatar } from '../../components/UserAvatar';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
+import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
 import { callApi, conversationApi, extractApiError } from '../../services/api';
 import type { CallHistoryItem, User } from '../../types';
 import { formatConversationTime, formatDuration } from '../../utils/formatters';
+import {
+  getCachedCallHistory,
+  saveCachedCallHistory,
+} from '../../utils/indexedDb';
+import {
+  CACHE_TIMES,
+  queryKeys,
+  removeCallFromCaches,
+} from '../../utils/queryClient';
 
 export function CallHistoryPage() {
   const navigate = useNavigate();
+  const { user } = useAuth();
   const { showToast } = useToast();
+  const qc = useQueryClient();
+  const userId = user?.id || '';
 
   const [filter, setFilter] = useState<'all' | 'missed'>('all');
   const [searchOpen, setSearchOpen] = useState(false);
   const [query, setQuery] = useState('');
-  const [calls, setCalls] = useState<CallHistoryItem[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+  const [debouncedQuery, setDebouncedQuery] = useState('');
+  const [idbSeed, setIdbSeed] = useState<CallHistoryItem[] | null>(null);
 
   const [callNoticeModal, setCallNoticeModal] = useState<'voice' | 'video' | 'new' | null>(null);
   const [detailEntry, setDetailEntry] = useState<CallHistoryItem | null>(null);
   const [contactProfile, setContactProfile] = useState<User | null>(null);
 
-  const loadHistory = useCallback(async () => {
-    setError(null);
-    setLoading(true);
-    try {
-      const data = await callApi.listHistory(filter, query);
-      setCalls(data);
-    } catch (err) {
-      setError(extractApiError(err).message);
-    } finally {
-      setLoading(false);
-    }
-  }, [filter, query]);
-
   useEffect(() => {
     const timer = setTimeout(() => {
-      loadHistory();
+      setDebouncedQuery(query.trim());
     }, 200);
     return () => clearTimeout(timer);
-  }, [loadHistory]);
+  }, [query]);
+
+  useEffect(() => {
+    if (!userId || debouncedQuery) return;
+    let active = true;
+    getCachedCallHistory(userId, filter).then((cached) => {
+      if (!active) return;
+      setIdbSeed(cached);
+      if (cached.length > 0) {
+        const key = queryKeys.callHistory(userId, filter, '');
+        if (!qc.getQueryData(key)) {
+          qc.setQueryData(key, cached);
+        }
+      }
+    });
+    return () => {
+      active = false;
+    };
+  }, [userId, filter, debouncedQuery, qc]);
+
+  const {
+    data: queryCalls,
+    isLoading,
+    error: queryError,
+    refetch,
+  } = useQuery({
+    queryKey: queryKeys.callHistory(userId, filter, debouncedQuery),
+    enabled: Boolean(userId),
+    staleTime: CACHE_TIMES.callHistory.staleTime,
+    gcTime: CACHE_TIMES.callHistory.gcTime,
+    queryFn: async () => {
+      try {
+        const fresh = await callApi.listHistory(filter, debouncedQuery);
+        if (!debouncedQuery && filter === 'all') {
+          void saveCachedCallHistory(userId, fresh);
+        }
+        return fresh;
+      } catch (err) {
+        if (!debouncedQuery) {
+          const cached = await getCachedCallHistory(userId, filter);
+          if (cached.length > 0 || (typeof navigator !== 'undefined' && !navigator.onLine)) {
+            return cached;
+          }
+        }
+        throw err;
+      }
+    },
+  });
+
+  const calls = queryCalls ?? (!debouncedQuery ? idbSeed ?? [] : []);
+  const loading = isLoading && calls.length === 0 && (Boolean(debouncedQuery) || idbSeed === null);
+  const error =
+    queryError && calls.length === 0
+      ? extractApiError(queryError).message
+      : null;
 
   const handleRemove = async (id: string) => {
     try {
       await callApi.deleteEntry(id);
-      setCalls((prev) => prev.filter((item) => item.id !== id));
+      removeCallFromCaches(userId, id);
       if (detailEntry?.id === id) setDetailEntry(null);
       showToast('Call history entry removed.', 'info');
     } catch (err) {
@@ -144,7 +198,7 @@ export function CallHistoryPage() {
           {loading ? (
             <LoadingState rows={5} />
           ) : error ? (
-            <ErrorState message={error} onRetry={loadHistory} />
+            <ErrorState message={error} onRetry={() => void refetch()} />
           ) : calls.length === 0 ? (
             <EmptyState
               icon={<Phone className="w-5 h-5" />}

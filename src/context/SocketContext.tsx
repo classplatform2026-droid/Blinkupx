@@ -2,17 +2,30 @@ import React, { createContext, useCallback, useContext, useEffect, useRef, useSt
 import { useLocation, useNavigate } from 'react-router-dom';
 import { io, type Socket } from 'socket.io-client';
 import { getStoredAuthToken } from '../services/api';
-import type { Message, NotificationSoundTone } from '../types';
+import type { Message, MessageLinkPreview, NotificationSoundTone } from '../types';
 import {
   DEFAULT_NOTIFICATION_SETTINGS,
   playNotificationTone,
   showBrowserNotification,
   triggerNotificationVibration,
 } from '../utils/notifications';
+import { flushOfflineOutgoingQueue } from '../utils/offlineQueue';
 import {
   getActiveBrowserPushSubscription,
   syncBrowserPushSubscriptionIfPermitted,
 } from '../utils/pushNotifications';
+import {
+  invalidateConversationQueries,
+  queryClient,
+  queryKeys,
+  syncIncomingMessageCaches,
+  syncMessageDeleteCaches,
+  syncMessageDeliveredCaches,
+  syncMessageEditCaches,
+  syncMessageLinksCaches,
+  syncMessageReadCaches,
+  syncReactionCaches,
+} from '../utils/queryClient';
 import { useAuth } from './AuthContext';
 import { useToast } from './ToastContext';
 
@@ -96,8 +109,6 @@ export function SocketProvider({ children }: { children: React.ReactNode }) {
     });
   }, []);
 
-  // Re-sync existing granted Web Push subscription silently on login/startup
-  // and refresh local subscription presence without prompting permission.
   const pushEnabledPref = user?.settings?.notifications?.pushEnabled ?? true;
 
   useEffect(() => {
@@ -154,6 +165,16 @@ export function SocketProvider({ children }: { children: React.ReactNode }) {
     };
   }, [navigate]);
 
+  // Flush offline outgoing queue whenever browser goes online
+  useEffect(() => {
+    if (!user?.id || typeof window === 'undefined') return;
+    const onOnline = () => {
+      void flushOfflineOutgoingQueue(socketRef.current, user.id);
+    };
+    window.addEventListener('online', onOnline);
+    return () => window.removeEventListener('online', onOnline);
+  }, [user?.id]);
+
   // Emit conversation focus whenever route or tab visibility/focus changes
   useEffect(() => {
     emitFocusState(socketRef.current);
@@ -185,6 +206,7 @@ export function SocketProvider({ children }: { children: React.ReactNode }) {
       return;
     }
 
+    const currentUserId = user.id;
     const socketUrl = import.meta.env.VITE_SOCKET_URL || undefined;
     const token = getStoredAuthToken();
     const s = io(socketUrl, {
@@ -197,7 +219,7 @@ export function SocketProvider({ children }: { children: React.ReactNode }) {
     socketRef.current = s;
 
     const acknowledgeDelivered = (msg?: Pick<Message, 'id' | 'conversationId' | 'senderId'>) => {
-      if (!msg?.id || !msg.conversationId || msg.senderId === user.id) return;
+      if (!msg?.id || !msg.conversationId || msg.senderId === currentUserId) return;
       if (ackedDeliveredIdsRef.current.has(msg.id)) return;
       ackedDeliveredIdsRef.current.add(msg.id);
       if (ackedDeliveredIdsRef.current.size > 250) {
@@ -214,20 +236,98 @@ export function SocketProvider({ children }: { children: React.ReactNode }) {
       setConnected(true);
       s.emit('message:sync_delivered');
       emitFocusState(s);
+      void flushOfflineOutgoingQueue(s, currentUserId);
     });
 
     s.on('message:new', (msg: Message) => {
       acknowledgeDelivered(msg);
+      syncIncomingMessageCaches(currentUserId, msg);
+      invalidateConversationQueries(currentUserId);
     });
+
+    s.on('message:edit', (updated: Message) => {
+      syncMessageEditCaches(currentUserId, updated);
+      invalidateConversationQueries(currentUserId);
+    });
+
+    s.on(
+      'message:links',
+      (payload: { id: string; conversationId: string; links: MessageLinkPreview[] }) => {
+        syncMessageLinksCaches(currentUserId, payload);
+      }
+    );
+
+    s.on(
+      'message:delete',
+      (payload: { id: string; conversationId: string; deletedAt: string }) => {
+        syncMessageDeleteCaches(currentUserId, payload);
+        invalidateConversationQueries(currentUserId);
+      }
+    );
+
+    s.on(
+      'message:delivered',
+      (payload: { conversationId: string; messageIds: string[]; userId?: string }) => {
+        syncMessageDeliveredCaches(currentUserId, payload);
+      }
+    );
+
+    s.on(
+      'message:read',
+      (payload: { conversationId: string; messageIds: string[]; userId: string }) => {
+        syncMessageReadCaches(currentUserId, payload);
+        invalidateConversationQueries(currentUserId);
+      }
+    );
+
+    const onReaction = (payload: {
+      messageId: string;
+      conversationId: string;
+      reactions: Array<{ emoji: string; userIds: string[] }>;
+    }) => {
+      syncReactionCaches(currentUserId, payload);
+    };
+    s.on('reaction:add', onReaction);
+    s.on('reaction:remove', onReaction);
 
     s.on(
       'conversation:activity',
       (payload: { conversationId?: string; message?: Message }) => {
         if (payload?.message) {
           acknowledgeDelivered(payload.message);
+          syncIncomingMessageCaches(currentUserId, payload.message);
         }
+        invalidateConversationQueries(currentUserId, payload?.conversationId);
       }
     );
+
+    s.on('conversation:new', () => {
+      invalidateConversationQueries(currentUserId);
+    });
+
+    s.on('conversation:updated', (payload: { conversationId?: string }) => {
+      invalidateConversationQueries(currentUserId, payload?.conversationId);
+    });
+
+    const onCommunityEvent = (payload?: { communityId?: string }) => {
+      void queryClient.invalidateQueries({
+        queryKey: queryKeys.communitiesPrefix(currentUserId),
+      });
+      if (payload?.communityId) {
+        void queryClient.invalidateQueries({
+          queryKey: queryKeys.community(currentUserId, payload.communityId),
+        });
+        void queryClient.invalidateQueries({
+          queryKey: queryKeys.communityMembersPrefix(currentUserId, payload.communityId),
+        });
+      }
+    };
+    s.on('community:updated', onCommunityEvent);
+    s.on('community:join_request', onCommunityEvent);
+    s.on('community:request_resolved', onCommunityEvent);
+    s.on('community:invited', onCommunityEvent);
+    s.on('community:removed', onCommunityEvent);
+    s.on('community:deleted', onCommunityEvent);
 
     s.on('disconnect', () => {
       setConnected(false);
@@ -257,7 +357,7 @@ export function SocketProvider({ children }: { children: React.ReactNode }) {
     s.on(
       'typing:start',
       (payload: { conversationId: string; userId: string; username: string }) => {
-        if (payload.userId === user.id) return;
+        if (payload.userId === currentUserId) return;
         const key = `${payload.conversationId}:${payload.userId}`;
         if (typingTimeoutsRef.current[key]) {
           clearTimeout(typingTimeoutsRef.current[key]);
@@ -344,8 +444,6 @@ export function SocketProvider({ children }: { children: React.ReactNode }) {
         }
 
         if (!isPageVisible) {
-          // If Web Push is actively subscribed for this browser, /sw.js renders the notification;
-          // avoid duplicating with window.Notification.
           if (!hasActivePushRef.current) {
             showBrowserNotification({
               title: payload.title,
@@ -409,10 +507,16 @@ export function SocketProvider({ children }: { children: React.ReactNode }) {
 
     s.on('user:blocked_updated', () => {
       refreshUser();
+      void queryClient.invalidateQueries({
+        queryKey: queryKeys.blockedUsers(currentUserId),
+      });
+      invalidateConversationQueries(currentUserId);
       window.dispatchEvent(new CustomEvent('blinkupz:relationship-updated'));
     });
 
     s.on('user:privacy_updated', (payload: { userId: string }) => {
+      void queryClient.invalidateQueries({ queryKey: ['publicProfile', currentUserId] });
+      invalidateConversationQueries(currentUserId);
       window.dispatchEvent(
         new CustomEvent('blinkupz:relationship-updated', { detail: payload })
       );

@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useEffect, useState } from 'react';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   Archive,
   CheckCheck,
@@ -17,6 +18,16 @@ import { useSocket } from '../../context/SocketContext';
 import { useToast } from '../../context/ToastContext';
 import { conversationApi, extractApiError } from '../../services/api';
 import type { Conversation } from '../../types';
+import {
+  getCachedConversations,
+  saveCachedConversation,
+  saveCachedConversations,
+} from '../../utils/indexedDb';
+import {
+  CACHE_TIMES,
+  queryKeys,
+  removeConversationFromCaches,
+} from '../../utils/queryClient';
 import { MessageScreen } from './MessageScreen';
 
 type FilterTab = 'all' | 'unread' | 'groups' | 'archived';
@@ -27,52 +38,86 @@ export function ChatsPage() {
   const { user } = useAuth();
   const { socket, presenceMap, typingMap } = useSocket();
   const { showToast } = useToast();
+  const qc = useQueryClient();
 
+  const userId = user?.id || '';
   const [filter, setFilter] = useState<FilterTab>('all');
-  const [conversations, setConversations] = useState<Conversation[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+  const [idbSeed, setIdbSeed] = useState<Conversation[] | null>(null);
 
-  const loadConversations = useCallback(async () => {
-    setError(null);
-    try {
-      const data = await conversationApi.list(filter);
-      setConversations(data);
-    } catch (err) {
-      setError(extractApiError(err).message);
-    } finally {
-      setLoading(false);
-    }
-  }, [filter]);
-
+  // Instant IndexedDB hydration on mount/filter switch so cached conversations appear immediately
   useEffect(() => {
-    setLoading(true);
-    loadConversations();
-  }, [loadConversations]);
-
-  useEffect(() => {
-    if (!socket) return;
-    const refresh = () => {
-      loadConversations();
-    };
-    socket.on('message:new', refresh);
-    socket.on('message:edit', refresh);
-    socket.on('message:delete', refresh);
-    socket.on('message:read', refresh);
-    socket.on('conversation:activity', refresh);
-    socket.on('conversation:new', refresh);
-    window.addEventListener('blinkupz:relationship-updated', refresh);
-
+    if (!userId) return;
+    let active = true;
+    getCachedConversations(userId, filter).then((cached) => {
+      if (!active) return;
+      setIdbSeed(cached);
+      if (cached.length > 0) {
+        const key = queryKeys.conversations(userId, filter);
+        if (!qc.getQueryData(key)) {
+          qc.setQueryData(key, cached);
+        }
+      }
+    });
     return () => {
-      socket.off('message:new', refresh);
-      socket.off('message:edit', refresh);
-      socket.off('message:delete', refresh);
-      socket.off('message:read', refresh);
-      socket.off('conversation:activity', refresh);
-      socket.off('conversation:new', refresh);
-      window.removeEventListener('blinkupz:relationship-updated', refresh);
+      active = false;
     };
-  }, [socket, loadConversations]);
+  }, [userId, filter, qc]);
+
+  const {
+    data: queryConversations,
+    isLoading,
+    error: queryError,
+    refetch,
+  } = useQuery({
+    queryKey: queryKeys.conversations(userId, filter),
+    enabled: Boolean(userId),
+    staleTime: CACHE_TIMES.conversations.staleTime,
+    gcTime: CACHE_TIMES.conversations.gcTime,
+    queryFn: async () => {
+      try {
+        const fresh = await conversationApi.list(filter);
+        void saveCachedConversations(userId, fresh);
+        return fresh;
+      } catch (err) {
+        // Offline or network drop: return IndexedDB cached list if available
+        const cached = await getCachedConversations(userId, filter);
+        if (cached.length > 0 || (typeof navigator !== 'undefined' && !navigator.onLine)) {
+          return cached;
+        }
+        throw err;
+      }
+    },
+  });
+
+  const conversations = queryConversations ?? idbSeed ?? [];
+  const showLoading = isLoading && conversations.length === 0 && idbSeed === null;
+  const errorMsg =
+    queryError && conversations.length === 0
+      ? extractApiError(queryError).message
+      : null;
+
+  useEffect(() => {
+    if (!userId) return;
+    const handleRefresh = () => {
+      void qc.invalidateQueries({ queryKey: queryKeys.conversationsPrefix(userId) });
+    };
+    window.addEventListener('blinkupz:relationship-updated', handleRefresh);
+    return () => {
+      window.removeEventListener('blinkupz:relationship-updated', handleRefresh);
+    };
+  }, [userId, qc]);
+
+  // Also trigger refetch cleanly if socket reconnects
+  useEffect(() => {
+    if (!socket || !userId) return;
+    const onReconnect = () => {
+      void qc.invalidateQueries({ queryKey: queryKeys.conversationsPrefix(userId) });
+    };
+    socket.on('connect', onReconnect);
+    return () => {
+      socket.off('connect', onReconnect);
+    };
+  }, [socket, userId, qc]);
 
   const handleConversationAction = async (
     convId: string,
@@ -81,12 +126,14 @@ export function ChatsPage() {
     try {
       if (action === 'delete') {
         await conversationApi.delete(convId);
+        removeConversationFromCaches(userId, convId);
         showToast('Conversation removed.', 'info');
         if (conversationId === convId) {
           navigate('/chats', { replace: true });
         }
       } else {
-        await conversationApi.updateMeta(convId, action);
+        const updated = await conversationApi.updateMeta(convId, action);
+        void saveCachedConversation(userId, updated);
         showToast(
           action === 'pin'
             ? 'Chat pinned'
@@ -100,7 +147,7 @@ export function ChatsPage() {
           'success'
         );
       }
-      loadConversations();
+      void qc.invalidateQueries({ queryKey: queryKeys.conversationsPrefix(userId) });
     } catch (err) {
       showToast(extractApiError(err).message, 'error');
     }
@@ -110,7 +157,7 @@ export function ChatsPage() {
     try {
       await conversationApi.markAllRead();
       showToast('All chats marked as read.', 'success');
-      loadConversations();
+      void qc.invalidateQueries({ queryKey: queryKeys.conversationsPrefix(userId) });
     } catch (err) {
       showToast(extractApiError(err).message, 'error');
     }
@@ -214,10 +261,10 @@ export function ChatsPage() {
         </div>
 
         <div className="flex-1 overflow-y-auto px-2 py-2 space-y-0.5">
-          {loading ? (
+          {showLoading ? (
             <LoadingState rows={6} />
-          ) : error ? (
-            <ErrorState message={error} onRetry={loadConversations} />
+          ) : errorMsg ? (
+            <ErrorState message={errorMsg} onRetry={() => void refetch()} />
           ) : conversations.length === 0 ? (
             <EmptyState
               icon={<MessageSquarePlus className="w-5 h-5" />}

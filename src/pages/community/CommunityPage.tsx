@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useEffect, useState } from 'react';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   Info,
   Lock,
@@ -13,62 +14,90 @@ import { DropdownMenu } from '../../components/DropdownMenu';
 import { PrimaryButton } from '../../components/PrimaryButton';
 import { EmptyState, ErrorState, LoadingState } from '../../components/States';
 import { UserAvatar } from '../../components/UserAvatar';
-import { useSocket } from '../../context/SocketContext';
+import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
 import { communityApi, extractApiError } from '../../services/api';
 import type { CommunitySummary } from '../../types';
+import {
+  getCachedCommunitiesList,
+  saveCachedCommunitiesList,
+} from '../../utils/indexedDb';
+import { CACHE_TIMES, queryKeys } from '../../utils/queryClient';
 
 export function CommunityPage() {
   const navigate = useNavigate();
-  const { socket } = useSocket();
+  const { user } = useAuth();
   const { showToast } = useToast();
+  const qc = useQueryClient();
 
+  const userId = user?.id || '';
   const [tab, setTab] = useState<'joined' | 'discover'>('joined');
   const [searchOpen, setSearchOpen] = useState(false);
   const [query, setQuery] = useState('');
-  const [communities, setCommunities] = useState<CommunitySummary[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+  const [debouncedQuery, setDebouncedQuery] = useState('');
+  const [idbSeed, setIdbSeed] = useState<CommunitySummary[] | null>(null);
   const [joiningId, setJoiningId] = useState<string | null>(null);
-
-  const loadCommunities = useCallback(async () => {
-    setError(null);
-    setLoading(true);
-    try {
-      const data = await communityApi.list(tab, query);
-      setCommunities(data);
-    } catch (err) {
-      setError(extractApiError(err).message);
-    } finally {
-      setLoading(false);
-    }
-  }, [tab, query]);
 
   useEffect(() => {
     const timer = setTimeout(() => {
-      loadCommunities();
+      setDebouncedQuery(query.trim());
     }, 200);
     return () => clearTimeout(timer);
-  }, [loadCommunities]);
+  }, [query]);
 
   useEffect(() => {
-    if (!socket) return;
-    const refresh = () => loadCommunities();
-    socket.on('community:updated', refresh);
-    socket.on('community:join_request', refresh);
-    socket.on('community:request_resolved', refresh);
-    socket.on('community:invited', refresh);
-    socket.on('community:removed', refresh);
-    socket.on('community:deleted', refresh);
+    if (!userId || debouncedQuery) return;
+    let active = true;
+    getCachedCommunitiesList(userId, tab).then((cached) => {
+      if (!active) return;
+      setIdbSeed(cached);
+      if (cached.length > 0) {
+        const key = queryKeys.communities(userId, tab, '');
+        if (!qc.getQueryData(key)) {
+          qc.setQueryData(key, cached);
+        }
+      }
+    });
     return () => {
-      socket.off('community:updated', refresh);
-      socket.off('community:join_request', refresh);
-      socket.off('community:request_resolved', refresh);
-      socket.off('community:invited', refresh);
-      socket.off('community:removed', refresh);
-      socket.off('community:deleted', refresh);
+      active = false;
     };
-  }, [socket, loadCommunities]);
+  }, [userId, tab, debouncedQuery, qc]);
+
+  const {
+    data: queryCommunities,
+    isLoading,
+    error: queryError,
+    refetch,
+  } = useQuery({
+    queryKey: queryKeys.communities(userId, tab, debouncedQuery),
+    enabled: Boolean(userId),
+    staleTime: CACHE_TIMES.communities.staleTime,
+    gcTime: CACHE_TIMES.communities.gcTime,
+    queryFn: async () => {
+      try {
+        const fresh = await communityApi.list(tab, debouncedQuery);
+        if (!debouncedQuery) {
+          void saveCachedCommunitiesList(userId, tab, fresh);
+        }
+        return fresh;
+      } catch (err) {
+        if (!debouncedQuery) {
+          const cached = await getCachedCommunitiesList(userId, tab);
+          if (cached.length > 0 || (typeof navigator !== 'undefined' && !navigator.onLine)) {
+            return cached;
+          }
+        }
+        throw err;
+      }
+    },
+  });
+
+  const communities = queryCommunities ?? (!debouncedQuery ? idbSeed ?? [] : []);
+  const showLoading = isLoading && communities.length === 0 && (Boolean(debouncedQuery) || idbSeed === null);
+  const errorMsg =
+    queryError && communities.length === 0
+      ? extractApiError(queryError).message
+      : null;
 
   const handleJoin = async (community: CommunitySummary) => {
     if (community.isMember) {
@@ -79,10 +108,11 @@ export function CommunityPage() {
     try {
       const res = await communityApi.join(community.id);
       showToast(res.message, 'success');
+      void qc.invalidateQueries({ queryKey: queryKeys.communitiesPrefix(userId) });
       if (res.data.isMember) {
         navigate(`/community/${community.id}`);
       } else {
-        loadCommunities();
+        void refetch();
       }
     } catch (err) {
       showToast(extractApiError(err).message, 'error');
@@ -186,10 +216,10 @@ export function CommunityPage() {
         </div>
 
         <div className="flex-1 overflow-y-auto py-4 space-y-3">
-          {loading ? (
+          {showLoading ? (
             <LoadingState rows={5} />
-          ) : error ? (
-            <ErrorState message={error} onRetry={loadCommunities} />
+          ) : errorMsg ? (
+            <ErrorState message={errorMsg} onRetry={() => void refetch()} />
           ) : communities.length === 0 ? (
             <EmptyState
               icon={<Users className="w-5 h-5" />}

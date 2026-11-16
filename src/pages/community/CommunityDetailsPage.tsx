@@ -22,11 +22,18 @@ import { Modal } from '../../components/Modal';
 import { PrimaryButton } from '../../components/PrimaryButton';
 import { ErrorState, LoadingState } from '../../components/States';
 import { UserAvatar } from '../../components/UserAvatar';
+import { useQueryClient } from '@tanstack/react-query';
+import { useAuth } from '../../context/AuthContext';
 import { useSocket } from '../../context/SocketContext';
 import { useToast } from '../../context/ToastContext';
 import { communityApi, extractApiError } from '../../services/api';
 import type { CommunityDetail } from '../../types';
 import { formatDateSeparator } from '../../utils/formatters';
+import {
+  getCachedCommunityDetail,
+  saveCachedCommunityDetail,
+} from '../../utils/indexedDb';
+import { CACHE_TIMES, queryKeys } from '../../utils/queryClient';
 
 const INVITE_LABELS: Record<string, string> = {
   owner_only: 'Owner only',
@@ -48,8 +55,11 @@ const POST_LABELS: Record<string, string> = {
 export function CommunityDetailsPage() {
   const { communityId } = useParams<{ communityId: string }>();
   const navigate = useNavigate();
+  const { user } = useAuth();
   const { socket } = useSocket();
   const { showToast } = useToast();
+  const qc = useQueryClient();
+  const userId = user?.id || '';
 
   const [community, setCommunity] = useState<CommunityDetail | null>(null);
   const [loading, setLoading] = useState(true);
@@ -62,19 +72,43 @@ export function CommunityDetailsPage() {
   const loadDetails = useCallback(async () => {
     if (!communityId) return;
     setError(null);
+    let hydrated = false;
+
+    if (userId) {
+      const mem = qc.getQueryData<CommunityDetail>(queryKeys.community(userId, communityId));
+      const cached = mem || (await getCachedCommunityDetail(userId, communityId));
+      if (cached) {
+        setCommunity(cached);
+        hydrated = true;
+        setLoading(false);
+      }
+    }
+
+    if (!hydrated) {
+      setLoading(true);
+    }
+
     try {
-      const data = await communityApi.getById(communityId);
+      const data = await qc.fetchQuery({
+        queryKey: queryKeys.community(userId || 'anon', communityId),
+        staleTime: CACHE_TIMES.communityDetail.staleTime,
+        queryFn: () => communityApi.getById(communityId),
+      });
       setCommunity(data);
+      if (userId) {
+        void saveCachedCommunityDetail(userId, data);
+      }
     } catch (err) {
-      setError(extractApiError(err).message);
+      if (!hydrated) {
+        setError(extractApiError(err).message);
+      }
     } finally {
       setLoading(false);
     }
-  }, [communityId]);
+  }, [communityId, userId, qc]);
 
   useEffect(() => {
-    setLoading(true);
-    loadDetails();
+    void loadDetails();
   }, [loadDetails]);
 
   useEffect(() => {

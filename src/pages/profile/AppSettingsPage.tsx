@@ -10,6 +10,7 @@ import {
   MessageSquare,
   Palette,
   Shield,
+  Trash2,
 } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 import { AppHeader } from '../../components/AppHeader';
@@ -19,6 +20,13 @@ import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
 import { extractApiError, userApi } from '../../services/api';
 import type { UserNotificationSettings, UserSettings } from '../../types';
+import { formatFileSize } from '../../utils/formatters';
+import {
+  clearCachedMediaOnly,
+  clearOfflineDataCache,
+  getAppStorageStats,
+  type AppStorageStats,
+} from '../../utils/mediaCache';
 import {
   DEFAULT_NOTIFICATION_SETTINGS,
   getBrowserNotificationState,
@@ -43,6 +51,8 @@ export function AppSettingsPage() {
   );
   const [deviceSubscribed, setDeviceSubscribed] = useState(false);
   const [infoModal, setInfoModal] = useState<'help' | 'about' | null>(null);
+  const [storageStats, setStorageStats] = useState<AppStorageStats | null>(null);
+  const [clearingCache, setClearingCache] = useState<'media' | 'offline' | null>(null);
 
   const webPushSupported = isWebPushSupported();
 
@@ -52,9 +62,16 @@ export function AppSettingsPage() {
     setDeviceSubscribed(Boolean(sub));
   }, []);
 
+  const refreshStorageStats = useCallback(async () => {
+    if (!user?.id) return;
+    const stats = await getAppStorageStats(user.id);
+    setStorageStats(stats);
+  }, [user?.id]);
+
   useEffect(() => {
     refreshPushState();
-  }, [refreshPushState]);
+    void refreshStorageStats();
+  }, [refreshPushState, refreshStorageStats]);
 
   if (!user) return null;
 
@@ -153,6 +170,33 @@ export function AppSettingsPage() {
   const handleClearLocalCache = () => {
     localStorage.removeItem(`blinkupz_recent_searches_${user.id}`);
     showToast('Cleared local search history.', 'success');
+  };
+
+  const handleClearMediaCache = async () => {
+    setClearingCache('media');
+    try {
+      await clearCachedMediaOnly();
+      await refreshStorageStats();
+      showToast('Cached media cleared.', 'success');
+    } finally {
+      setClearingCache(null);
+    }
+  };
+
+  const handleClearOfflineData = async () => {
+    setClearingCache('offline');
+    try {
+      await clearOfflineDataCache(true);
+      await refreshStorageStats();
+      showToast(
+        storageStats?.pendingMessagesCount
+          ? 'Offline message cache cleared (queued unsent messages preserved).'
+          : 'Offline message and profile cache cleared.',
+        'success'
+      );
+    } finally {
+      setClearingCache(null);
+    }
   };
 
   const pushActive =
@@ -550,10 +594,46 @@ export function AppSettingsPage() {
 
           {/* Storage & Data */}
           <section className="rounded-2xl bg-[#202020] border border-[#303030] p-5 space-y-4">
-            <div className="flex items-center gap-2.5">
-              <Database className="w-4 h-4 text-[#999999]" />
-              <h2 className="text-sm font-semibold text-[#FFFFFF]">Storage &amp; Data</h2>
+            <div className="flex items-center justify-between gap-2">
+              <div className="flex items-center gap-2.5">
+                <Database className="w-4 h-4 text-[#999999]" />
+                <h2 className="text-sm font-semibold text-[#FFFFFF]">Storage &amp; Data</h2>
+              </div>
+              {storageStats?.usageBytes !== null && storageStats?.usageBytes !== undefined && (
+                <span className="text-[11px] font-mono tabular-nums text-[#999999]">
+                  {formatFileSize(storageStats.usageBytes)} used
+                </span>
+              )}
             </div>
+
+            {storageStats && (
+              <div className="rounded-xl bg-[#181818] border border-[#303030] p-3.5 grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs">
+                <div>
+                  <p className="text-[#999999]">Cached chats</p>
+                  <p className="text-sm font-mono tabular-nums font-semibold text-[#FFFFFF] mt-0.5">
+                    {storageStats.conversationsCount}
+                  </p>
+                </div>
+                <div>
+                  <p className="text-[#999999]">Cached messages</p>
+                  <p className="text-sm font-mono tabular-nums font-semibold text-[#FFFFFF] mt-0.5">
+                    {storageStats.messagesCount}
+                  </p>
+                </div>
+                <div>
+                  <p className="text-[#999999]">Cached media</p>
+                  <p className="text-sm font-mono tabular-nums font-semibold text-[#FFFFFF] mt-0.5">
+                    {storageStats.mediaCacheEntries}
+                  </p>
+                </div>
+                <div>
+                  <p className="text-[#999999]">Offline queue</p>
+                  <p className="text-sm font-mono tabular-nums font-semibold text-[#FFFFFF] mt-0.5">
+                    {storageStats.pendingMessagesCount}
+                  </p>
+                </div>
+              </div>
+            )}
 
             <div className="flex items-center justify-between gap-4">
               <div>
@@ -583,6 +663,42 @@ export function AppSettingsPage() {
 
             <div className="flex items-center justify-between gap-4 pt-3 border-t border-[#303030]">
               <div>
+                <p className="text-sm text-[#FFFFFF]">Media Cache</p>
+                <p className="text-xs text-[#999999]">
+                  Clear cached profile photos, thumbnails &amp; chat images
+                </p>
+              </div>
+              <PrimaryButton
+                variant="secondary"
+                loading={clearingCache === 'media'}
+                onClick={handleClearMediaCache}
+                className="min-h-[36px] py-1.5 px-3.5 text-xs shrink-0"
+              >
+                <Trash2 className="w-3.5 h-3.5" />
+                <span>Clear Media</span>
+              </PrimaryButton>
+            </div>
+
+            <div className="flex items-center justify-between gap-4 pt-3 border-t border-[#303030]">
+              <div>
+                <p className="text-sm text-[#FFFFFF]">Offline Data Cache</p>
+                <p className="text-xs text-[#999999]">
+                  Clear locally stored chats, messages, communities &amp; profiles
+                </p>
+              </div>
+              <PrimaryButton
+                variant="secondary"
+                loading={clearingCache === 'offline'}
+                onClick={handleClearOfflineData}
+                className="min-h-[36px] py-1.5 px-3.5 text-xs shrink-0"
+              >
+                <Trash2 className="w-3.5 h-3.5" />
+                <span>Clear Offline</span>
+              </PrimaryButton>
+            </div>
+
+            <div className="flex items-center justify-between gap-4 pt-3 border-t border-[#303030]">
+              <div>
                 <p className="text-sm text-[#FFFFFF]">Recent Search Cache</p>
                 <p className="text-xs text-[#999999]">
                   Clear locally stored recent search terms
@@ -591,9 +707,9 @@ export function AppSettingsPage() {
               <PrimaryButton
                 variant="secondary"
                 onClick={handleClearLocalCache}
-                className="min-h-[36px] py-1.5 px-3.5 text-xs"
+                className="min-h-[36px] py-1.5 px-3.5 text-xs shrink-0"
               >
-                Clear Cache
+                Clear History
               </PrimaryButton>
             </div>
           </section>

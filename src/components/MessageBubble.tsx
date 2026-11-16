@@ -656,13 +656,24 @@ export function MessageBubble({
               }`}
             >
               {message.editedAt && !isDeleted && <span>edited</span>}
+              {isOwn && !isDeleted && message.deliveryStatus === 'sending' && message.localQueued && (
+                <span className="text-[10px] font-sans text-[#777777]">
+                  Waiting for connection ·
+                </span>
+              )}
               <span>{formatTime(message.createdAt)}</span>
               {isOwn && !isDeleted && (
                 <span
-                  aria-label={message.deliveryStatus}
+                  aria-label={
+                    message.deliveryStatus === 'sending' && message.localQueued
+                      ? 'Waiting for connection'
+                      : message.deliveryStatus
+                  }
                   title={
                     message.deliveryStatus === 'sending'
-                      ? 'Sending...'
+                      ? message.localQueued
+                        ? 'Waiting for connection'
+                        : 'Sending...'
                       : message.deliveryStatus === 'sent'
                         ? 'Sent'
                         : message.deliveryStatus === 'delivered'

@@ -1,0 +1,23 @@
+{
+  "name": "BlinkUpZ",
+  "short_name": "BlinkUpZ",
+  "description": "Connect. Communicate. Together. Real-time dark-mode messaging, communities, and media sharing.",
+  "start_url": "/chats",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#181818",
+  "theme_color": "#181818",
+  "icons": [
+    {
+      "src": "/blinkupz-icon.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "/blinkupz-badge.png",
+      "sizes": "96x96",
+      "type": "image/png"
+    }
+  ]
+}

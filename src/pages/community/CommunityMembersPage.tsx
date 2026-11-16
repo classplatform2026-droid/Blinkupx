@@ -15,11 +15,17 @@ import { Modal } from '../../components/Modal';
 import { PrimaryButton } from '../../components/PrimaryButton';
 import { EmptyState, ErrorState, LoadingState } from '../../components/States';
 import { UserAvatar } from '../../components/UserAvatar';
+import { useQueryClient } from '@tanstack/react-query';
 import { useAuth } from '../../context/AuthContext';
 import { useSocket } from '../../context/SocketContext';
 import { useToast } from '../../context/ToastContext';
 import { communityApi, extractApiError } from '../../services/api';
 import type { CommunityMemberEntry, CommunityMembersResponse } from '../../types';
+import {
+  getCachedCommunityMembers,
+  saveCachedCommunityMembers,
+} from '../../utils/indexedDb';
+import { CACHE_TIMES, queryKeys } from '../../utils/queryClient';
 
 type MembersTab = 'all' | 'admins' | 'moderators' | 'requests';
 
@@ -30,6 +36,8 @@ export function CommunityMembersPage() {
   const { user } = useAuth();
   const { socket } = useSocket();
   const { showToast } = useToast();
+  const qc = useQueryClient();
+  const userId = user?.id || '';
 
   const initialTab = (searchParams.get('tab') as MembersTab) || 'all';
   const [tab, setTab] = useState<MembersTab>(
@@ -48,24 +56,53 @@ export function CommunityMembersPage() {
   const loadMembers = useCallback(async () => {
     if (!communityId) return;
     setError(null);
+    const trimmedQ = query.trim();
+    const apiRole =
+      tab === 'requests' ? 'all' : (tab as 'all' | 'admins' | 'moderators');
+
+    let hydrated = false;
+    if (userId && !trimmedQ && apiRole === 'all') {
+      const mem = qc.getQueryData<CommunityMembersResponse>(
+        queryKeys.communityMembers(userId, communityId, apiRole, '')
+      );
+      const cached = mem || (await getCachedCommunityMembers(userId, communityId));
+      if (cached) {
+        setData(cached);
+        hydrated = true;
+        setLoading(false);
+      }
+    }
+
+    if (!hydrated) {
+      setLoading(true);
+    }
+
     try {
-      const apiRole =
-        tab === 'requests' ? 'all' : (tab as 'all' | 'admins' | 'moderators');
-      const res = await communityApi.listMembers(communityId, {
-        q: query.trim(),
-        role: apiRole,
+      const res = await qc.fetchQuery({
+        queryKey: queryKeys.communityMembers(userId || 'anon', communityId, apiRole, trimmedQ),
+        staleTime: CACHE_TIMES.communityMembers.staleTime,
+        queryFn: () =>
+          communityApi.listMembers(communityId, {
+            q: trimmedQ,
+            role: apiRole,
+          }),
       });
       setData(res);
+      if (userId && !trimmedQ && apiRole === 'all') {
+        void saveCachedCommunityMembers(userId, communityId, res);
+      }
     } catch (err) {
-      setError(extractApiError(err).message);
+      if (!hydrated) {
+        setError(extractApiError(err).message);
+      }
     } finally {
       setLoading(false);
     }
-  }, [communityId, tab, query]);
+  }, [communityId, tab, query, userId, qc]);
 
   useEffect(() => {
     const timer = setTimeout(() => {
-      loadMembers();
+      void loadMembers();
     }, 150);
     return () => clearTimeout(timer);
   }, [loadMembers]);

@@ -6,18 +6,26 @@ import { Modal } from '../../components/Modal';
 import { PrimaryButton } from '../../components/PrimaryButton';
 import { EmptyState, ErrorState, LoadingState } from '../../components/States';
 import { UserAvatar } from '../../components/UserAvatar';
+import { useQueryClient } from '@tanstack/react-query';
 import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
 import { extractApiError, userApi } from '../../services/api';
 import type { User } from '../../types';
+import { CACHE_TIMES, queryKeys } from '../../utils/queryClient';
 
 export function BlockedContactsPage() {
   const navigate = useNavigate();
-  const { setAuthenticatedUser } = useAuth();
+  const { user, setAuthenticatedUser } = useAuth();
   const { showToast } = useToast();
+  const qc = useQueryClient();
+  const userId = user?.id || '';
 
-  const [blockedUsers, setBlockedUsers] = useState<User[]>([]);
-  const [loading, setLoading] = useState(true);
+  const [blockedUsers, setBlockedUsers] = useState<User[]>(() =>
+    userId ? qc.getQueryData<User[]>(queryKeys.blockedUsers(userId)) || [] : []
+  );
+  const [loading, setLoading] = useState(() =>
+    !(userId && qc.getQueryData<User[]>(queryKeys.blockedUsers(userId)))
+  );
   const [error, setError] = useState<string | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
 
@@ -32,20 +40,28 @@ export function BlockedContactsPage() {
   } | null>(null);
 
   const loadBlocked = useCallback(async () => {
-    setLoading(true);
+    if (!qc.getQueryData(queryKeys.blockedUsers(userId || 'anon'))) {
+      setLoading(true);
+    }
     setError(null);
     try {
-      const list = await userApi.getBlockedUsers();
+      const list = await qc.fetchQuery({
+        queryKey: queryKeys.blockedUsers(userId || 'anon'),
+        staleTime: CACHE_TIMES.settings.staleTime,
+        queryFn: () => userApi.getBlockedUsers(),
+      });
       setBlockedUsers(list);
     } catch (err) {
-      setError(extractApiError(err).message);
+      if (blockedUsers.length === 0) {
+        setError(extractApiError(err).message);
+      }
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [qc, userId, blockedUsers.length]);
 
   useEffect(() => {
-    loadBlocked();
+    void loadBlocked();
   }, [loadBlocked]);
 
   useEffect(() => {
@@ -80,17 +96,23 @@ export function BlockedContactsPage() {
       if (type === 'block') {
         const res = await userApi.blockUser(target.id);
         if (res.data.user) setAuthenticatedUser(res.data.user);
-        setBlockedUsers((prev) =>
-          prev.some((u) => u.id === target.id)
+        setBlockedUsers((prev) => {
+          const next = prev.some((u) => u.id === target.id)
             ? prev
-            : [...prev, { ...target, isBlockedByMe: true }]
-        );
+            : [...prev, { ...target, isBlockedByMe: true }];
+          if (userId) qc.setQueryData(queryKeys.blockedUsers(userId), next);
+          return next;
+        });
         setAddModalOpen(false);
         showToast(`${target.fullName} blocked.`, 'info');
       } else {
         const res = await userApi.unblockUser(target.id);
         if (res.data.user) setAuthenticatedUser(res.data.user);
-        setBlockedUsers((prev) => prev.filter((u) => u.id !== target.id));
+        setBlockedUsers((prev) => {
+          const next = prev.filter((u) => u.id !== target.id);
+          if (userId) qc.setQueryData(queryKeys.blockedUsers(userId), next);
+          return next;
+        });
         showToast(`${target.fullName} unblocked.`, 'success');
       }
       setConfirmAction(null);

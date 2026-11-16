@@ -8,11 +8,16 @@ import type {
   MessageAttachment,
   User,
 } from '../types';
+import { removePendingOutgoingMessage } from '../utils/indexedDb';
 import {
   generateClientItemId,
   resolveBatchMessageType,
   type StagedMediaItem,
 } from '../utils/mediaConfig';
+import {
+  enqueueOfflineOutgoingMessage,
+  isLikelyNetworkDisconnectError,
+} from '../utils/offlineQueue';
 import {
   createOptimisticMessage,
   dispatchMessageToServer,
@@ -24,6 +29,7 @@ import {
   removeOptimisticMessage,
   updateOptimisticMediaProgress,
 } from '../utils/optimisticMessages';
+import { syncIncomingMessageCaches } from '../utils/queryClient';
 
 export interface OutgoingMessagePayload {
   content?: string;
@@ -93,7 +99,6 @@ export function useOptimisticChatSender({
         return;
       }
 
-      // Delay revocation slightly so browser finishes rendering permanent server URL smoothly
       revokeTimersRef.current[clientMessageId] = setTimeout(() => {
         revokeUrlsForItems(localItemsRef.current[clientMessageId]);
         delete localItemsRef.current[clientMessageId];
@@ -113,6 +118,45 @@ export function useOptimisticChatSender({
     };
   }, [revokeUrlsForItems]);
 
+  // Listen for background offline-queue completion/failure events for this thread
+  useEffect(() => {
+    if (!conversationId) return;
+
+    const onSynced = (ev: Event) => {
+      const detail = (ev as CustomEvent<{ conversationId: string; message: Message }>)
+        .detail;
+      if (!detail || detail.conversationId !== conversationId) return;
+      scheduleCleanupLocalResources(detail.message.clientMessageId, false);
+      setMessages((prev) => reconcileIncomingMessage(prev, detail.message));
+    };
+
+    const onFailed = (ev: Event) => {
+      const detail = (
+        ev as CustomEvent<{
+          conversationId: string;
+          clientMessageId: string;
+          error: string;
+        }>
+      ).detail;
+      if (!detail || detail.conversationId !== conversationId) return;
+      setMessages((prev) =>
+        markOptimisticFailed(prev, detail.clientMessageId, detail.error).map((m) =>
+          m.clientMessageId === detail.clientMessageId ||
+          m.id === detail.clientMessageId
+            ? { ...m, localQueued: false }
+            : m
+        )
+      );
+    };
+
+    window.addEventListener('blinkupz:offline-message-synced', onSynced);
+    window.addEventListener('blinkupz:offline-message-failed', onFailed);
+    return () => {
+      window.removeEventListener('blinkupz:offline-message-synced', onSynced);
+      window.removeEventListener('blinkupz:offline-message-failed', onFailed);
+    };
+  }, [conversationId, scheduleCleanupLocalResources, setMessages]);
+
   const performSendAttempt = useCallback(
     async (params: {
       clientMessageId: string;
@@ -120,14 +164,41 @@ export function useOptimisticChatSender({
       messageType: 'text' | 'image' | 'video' | 'document' | 'voice';
       attachments?: MessageAttachment[];
       replyTo?: string | null;
+      duration?: number;
+      optimisticSnapshot?: Message;
     }) => {
-      if (!conversationId) return;
-      const { clientMessageId, content, messageType, replyTo } = params;
+      if (!conversationId || !user) return;
+      const { clientMessageId, content, messageType, replyTo, duration } = params;
       if (inFlightSendRef.current.has(clientMessageId)) return;
       inFlightSendRef.current.add(clientMessageId);
 
       try {
         const localItems = localItemsRef.current[clientMessageId];
+
+        // If browser is clearly offline, enqueue directly in IndexedDB instead of failing
+        if (typeof navigator !== 'undefined' && !navigator.onLine) {
+          if (params.optimisticSnapshot) {
+            await enqueueOfflineOutgoingMessage({
+              ownerUserId: user.id,
+              conversationId,
+              message: params.optimisticSnapshot,
+              content,
+              messageType,
+              replyTo,
+              duration,
+              stagedItems: localItems,
+            });
+          }
+          setMessages((prev) =>
+            prev.map((m) =>
+              m.clientMessageId === clientMessageId || m.id === clientMessageId
+                ? { ...m, deliveryStatus: 'sending', localQueued: true, localError: null }
+                : m
+            )
+          );
+          return;
+        }
+
         let resolvedAttachments: MessageAttachment[] = params.attachments || [];
 
         if (localItems && localItems.length > 0) {
@@ -136,7 +207,6 @@ export function useOptimisticChatSender({
           }
           const cache = uploadedMapRef.current[clientMessageId];
 
-          // Mark non-cached items as preparing before queuing upload workers
           for (const item of localItems) {
             if (cache[item.clientItemId]) {
               setMessages((prev) =>
@@ -158,7 +228,8 @@ export function useOptimisticChatSender({
           }
 
           const pendingItems = localItems.filter((item) => !cache[item.clientItemId]);
-          const itemErrors: Array<{ itemId: string; message: string }> = [];
+          const itemErrors: Array<{ itemId: string; message: string; isNetwork: boolean }> =
+            [];
 
           let cursor = 0;
           const worker = async () => {
@@ -186,10 +257,15 @@ export function useOptimisticChatSender({
                   (pct) => {
                     const clamped = Math.max(0, Math.min(100, pct));
                     setMessages((prev) =>
-                      updateOptimisticMediaProgress(prev, clientMessageId, item.clientItemId, {
-                        stage: clamped >= 100 ? 'processing' : 'uploading',
-                        progress: clamped,
-                      })
+                      updateOptimisticMediaProgress(
+                        prev,
+                        clientMessageId,
+                        item.clientItemId,
+                        {
+                          stage: clamped >= 100 ? 'processing' : 'uploading',
+                          progress: clamped,
+                        }
+                      )
                     );
                   },
                   fileNameOverride
@@ -212,7 +288,8 @@ export function useOptimisticChatSender({
                 );
               } catch (err) {
                 const errMsg = extractApiError(err).message || 'Upload failed';
-                itemErrors.push({ itemId: item.clientItemId, message: errMsg });
+                const isNet = isLikelyNetworkDisconnectError(err);
+                itemErrors.push({ itemId: item.clientItemId, message: errMsg, isNetwork: isNet });
                 setMessages((prev) =>
                   updateOptimisticMediaProgress(prev, clientMessageId, item.clientItemId, {
                     stage: 'failed',
@@ -227,6 +304,31 @@ export function useOptimisticChatSender({
           await Promise.all(Array.from({ length: workerCount }, () => worker()));
 
           if (itemErrors.length > 0) {
+            if (itemErrors.every((e) => e.isNetwork) && params.optimisticSnapshot) {
+              await enqueueOfflineOutgoingMessage({
+                ownerUserId: user.id,
+                conversationId,
+                message: params.optimisticSnapshot,
+                content,
+                messageType,
+                replyTo,
+                duration,
+                stagedItems: localItems,
+              });
+              setMessages((prev) =>
+                prev.map((m) =>
+                  m.clientMessageId === clientMessageId || m.id === clientMessageId
+                    ? {
+                        ...m,
+                        deliveryStatus: 'sending',
+                        localQueued: true,
+                        localError: null,
+                      }
+                    : m
+                )
+              );
+              return;
+            }
             throw new Error(
               itemErrors.length === 1
                 ? itemErrors[0].message
@@ -234,7 +336,6 @@ export function useOptimisticChatSender({
             );
           }
 
-          // Preserve exact selected order
           resolvedAttachments = localItems.map((item) => cache[item.clientItemId]);
         }
 
@@ -250,7 +351,9 @@ export function useOptimisticChatSender({
           },
         });
 
+        await removePendingOutgoingMessage(clientMessageId);
         scheduleCleanupLocalResources(clientMessageId, false);
+        syncIncomingMessageCaches(user.id, created);
 
         if (hasNewerMessages) {
           const latest = await messageApi.list(conversationId);
@@ -265,6 +368,31 @@ export function useOptimisticChatSender({
           new CustomEvent('blinkupz:shared-media-refresh', { detail: { conversationId } })
         );
       } catch (err) {
+        if (isLikelyNetworkDisconnectError(err) && params.optimisticSnapshot) {
+          await enqueueOfflineOutgoingMessage({
+            ownerUserId: user.id,
+            conversationId,
+            message: params.optimisticSnapshot,
+            content,
+            messageType,
+            replyTo,
+            duration,
+            stagedItems: localItemsRef.current[clientMessageId],
+          });
+          setMessages((prev) =>
+            prev.map((m) =>
+              m.clientMessageId === clientMessageId || m.id === clientMessageId
+                ? {
+                    ...m,
+                    deliveryStatus: 'sending',
+                    localQueued: true,
+                    localError: null,
+                  }
+                : m
+            )
+          );
+          return;
+        }
         const errorMsg = formatSendErrorMessage(err);
         setMessages((prev) => markOptimisticFailed(prev, clientMessageId, errorMsg));
       } finally {
@@ -273,6 +401,7 @@ export function useOptimisticChatSender({
     },
     [
       conversationId,
+      user,
       socket,
       hasNewerMessages,
       setMessages,
@@ -286,6 +415,7 @@ export function useOptimisticChatSender({
     (payload: OutgoingMessagePayload, replySnapshot: Message | null) => {
       if (!user || !conversationId) return;
       const clientMessageId = generateClientMessageId();
+      const isCurrentlyOffline = typeof navigator !== 'undefined' && !navigator.onLine;
 
       let stagedItems: StagedMediaItem[] = [];
       if (payload.mediaItems && payload.mediaItems.length > 0) {
@@ -331,12 +461,14 @@ export function useOptimisticChatSender({
           duration: item.duration,
           caption: item.caption.trim() || undefined,
         }));
-        initialProgress = stagedItems.map((item) => ({
-          clientItemId: item.clientItemId,
-          stage: 'preparing',
-          progress: 0,
-          error: null,
-        }));
+        initialProgress = isCurrentlyOffline
+          ? undefined
+          : stagedItems.map((item) => ({
+              clientItemId: item.clientItemId,
+              stage: 'preparing',
+              progress: 0,
+              error: null,
+            }));
       }
 
       const optimistic = createOptimisticMessage({
@@ -350,6 +482,10 @@ export function useOptimisticChatSender({
         replyTo: replySnapshot,
         duration: payload.duration,
       });
+
+      if (isCurrentlyOffline) {
+        optimistic.localQueued = true;
+      }
 
       if (hasNewerMessages) {
         setMessages([optimistic]);
@@ -368,6 +504,8 @@ export function useOptimisticChatSender({
         messageType: resolvedType,
         attachments: stagedItems.length > 0 ? undefined : payload.attachments,
         replyTo: replySnapshot?.id || null,
+        duration: payload.duration,
+        optimisticSnapshot: optimistic,
       });
     },
     [
@@ -396,6 +534,8 @@ export function useOptimisticChatSender({
           ? undefined
           : msg.retryPayload?.attachments ?? msg.attachments,
         replyTo: msg.retryPayload?.replyTo ?? msg.replyTo?.id ?? null,
+        duration: msg.retryPayload?.duration,
+        optimisticSnapshot: msg,
       });
     },
     [performSendAttempt, setMessages]
@@ -405,6 +545,7 @@ export function useOptimisticChatSender({
     (msg: Message) => {
       const cid = msg.clientMessageId || msg.id;
       scheduleCleanupLocalResources(cid, true);
+      void removePendingOutgoingMessage(cid);
       setMessages((prev) => removeOptimisticMessage(prev, msg.id));
     },
     [scheduleCleanupLocalResources, setMessages]

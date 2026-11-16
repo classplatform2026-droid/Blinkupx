@@ -190,6 +190,7 @@ export interface Message {
   deliveredTo: string[];
   readBy: string[];
   deliveryStatus: MessageDeliveryStatus;
+  localQueued?: boolean;
   mediaProgress?: MediaUploadProgressItem[];
   localError?: string | null;
   retryPayload?: {

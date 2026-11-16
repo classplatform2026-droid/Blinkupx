@@ -28,6 +28,7 @@ import { useAuth } from '../../context/AuthContext';
 import { useSocket } from '../../context/SocketContext';
 import { useToast } from '../../context/ToastContext';
 import { useOptimisticChatSender } from '../../hooks/useOptimisticChatSender';
+import { useQueryClient } from '@tanstack/react-query';
 import {
   communityApi,
   conversationApi,
@@ -41,7 +42,25 @@ import type {
   MessageLinkPreview,
 } from '../../types';
 import { formatDateSeparator } from '../../utils/formatters';
+import {
+  getCachedCommunityDetail,
+  getCachedConversationById,
+  getCachedMessages,
+  getPendingOutgoingMessages,
+  saveCachedCommunityDetail,
+  saveCachedConversation,
+  saveCachedMessages,
+} from '../../utils/indexedDb';
+import { hydratePendingMessagesForUi } from '../../utils/offlineQueue';
 import { reconcileIncomingMessage } from '../../utils/optimisticMessages';
+import {
+  CACHE_TIMES,
+  queryKeys,
+  syncMessageDeleteCaches,
+  syncMessageEditCaches,
+  syncReactionCaches,
+  type ThreadMessagesCacheData,
+} from '../../utils/queryClient';
 
 export function GroupChatPage() {
   const { communityId } = useParams<{ communityId: string }>();
@@ -51,6 +70,8 @@ export function GroupChatPage() {
   const { user } = useAuth();
   const { socket, typingMap } = useSocket();
   const { showToast } = useToast();
+  const qc = useQueryClient();
+  const userId = user?.id || '';
 
   const [community, setCommunity] = useState<CommunityDetail | null>(null);
   const [conversation, setConversation] = useState<Conversation | null>(null);
@@ -98,41 +119,126 @@ export function GroupChatPage() {
   const loadGroupChat = useCallback(async () => {
     if (!communityId) return;
     setError(null);
-    setLoading(true);
+    let hydrated = false;
+
+    if (userId && !highlightId) {
+      const memComm = qc.getQueryData<CommunityDetail>(
+        queryKeys.community(userId, communityId)
+      );
+      const idbComm = memComm || (await getCachedCommunityDetail(userId, communityId));
+      if (idbComm) {
+        setCommunity(idbComm);
+        if (idbComm.isMember && idbComm.conversationId) {
+          const cid = idbComm.conversationId;
+          const memConv = qc.getQueryData<Conversation>(
+            queryKeys.conversation(userId, cid)
+          );
+          const memMsgs = qc.getQueryData<ThreadMessagesCacheData>(
+            queryKeys.messages(userId, cid)
+          );
+          const [idbConv, idbMsgs, pendingRecs] = await Promise.all([
+            memConv ? Promise.resolve(memConv) : getCachedConversationById(userId, cid),
+            memMsgs ? Promise.resolve(null) : getCachedMessages(userId, cid, 60),
+            getPendingOutgoingMessages(userId, cid),
+          ]);
+          if (idbConv) {
+            setConversation(idbConv);
+            hydrated = true;
+            setLoading(false);
+          }
+          const baseMsgs = memMsgs?.messages || idbMsgs || [];
+          let merged = [...baseMsgs];
+          for (const p of hydratePendingMessagesForUi(pendingRecs)) {
+            merged = reconcileIncomingMessage(merged, p);
+          }
+          if (merged.length > 0) {
+            setMessages(merged);
+            if (memMsgs) {
+              setHasMore(memMsgs.hasMore);
+              setHasNewerMessages(Boolean(memMsgs.hasNewer));
+            }
+            hydrated = true;
+            setLoading(false);
+          }
+        } else {
+          hydrated = true;
+          setLoading(false);
+        }
+      }
+    }
+
+    if (!hydrated) {
+      setLoading(true);
+    }
+
     try {
-      const commData = await communityApi.getById(communityId);
+      const commData = await qc.fetchQuery({
+        queryKey: queryKeys.community(userId || 'anon', communityId),
+        staleTime: CACHE_TIMES.communityDetail.staleTime,
+        queryFn: () => communityApi.getById(communityId),
+      });
       setCommunity(commData);
+      if (userId) {
+        void saveCachedCommunityDetail(userId, commData);
+      }
 
       if (commData.isMember && commData.conversationId) {
-        const convData = await conversationApi.getById(commData.conversationId);
-        const msgData = highlightId
-          ? await messageApi
-              .getAround(commData.conversationId, highlightId)
-              .catch(() => messageApi.list(commData.conversationId!))
-          : await messageApi.list(commData.conversationId);
+        const cid = commData.conversationId;
+        const [convData, msgData, pendingRecs] = await Promise.all([
+          qc.fetchQuery({
+            queryKey: queryKeys.conversation(userId || 'anon', cid),
+            staleTime: CACHE_TIMES.conversationDetail.staleTime,
+            queryFn: () => conversationApi.getById(cid),
+          }),
+          highlightId
+            ? messageApi.getAround(cid, highlightId).catch(() => messageApi.list(cid))
+            : messageApi.list(cid),
+          userId ? getPendingOutgoingMessages(userId, cid) : Promise.resolve([]),
+        ]);
+
+        let mergedMsgs = [...msgData.messages];
+        for (const p of hydratePendingMessagesForUi(pendingRecs)) {
+          mergedMsgs = reconcileIncomingMessage(mergedMsgs, p);
+        }
+
         setConversation(convData);
-        setMessages(msgData.messages);
+        setMessages(mergedMsgs);
         setHasMore(msgData.hasMore);
         setHasNewerMessages(Boolean('hasNewer' in msgData && msgData.hasNewer));
+
+        if (userId) {
+          void saveCachedConversation(userId, convData);
+          if (!highlightId) {
+            void saveCachedMessages(userId, msgData.messages);
+            qc.setQueryData<ThreadMessagesCacheData>(queryKeys.messages(userId, cid), {
+              messages: mergedMsgs,
+              hasMore: msgData.hasMore,
+              hasNewer: Boolean('hasNewer' in msgData && msgData.hasNewer),
+            });
+          }
+        }
+
         if (highlightId) {
           setPendingScrollId(highlightId);
           setJumpedMessageId(highlightId);
         }
 
-        socket?.emit('group:join', { conversationId: commData.conversationId });
+        socket?.emit('group:join', { conversationId: cid });
         if (typeof document === 'undefined' || document.visibilityState === 'visible') {
-          socket?.emit('message:read', { conversationId: commData.conversationId });
+          socket?.emit('message:read', { conversationId: cid });
         }
       }
     } catch (err) {
-      setError(extractApiError(err).message);
+      if (!hydrated) {
+        setError(extractApiError(err).message);
+      }
     } finally {
       setLoading(false);
     }
-  }, [communityId, highlightId, socket]);
+  }, [communityId, highlightId, socket, userId, qc]);
 
   useEffect(() => {
-    loadGroupChat();
+    void loadGroupChat();
   }, [loadGroupChat]);
 
   useEffect(() => {
@@ -666,6 +772,9 @@ export function GroupChatPage() {
                 const data = await messageApi.list(convId, messages[0].createdAt);
                 setMessages((prev) => [...data.messages, ...prev]);
                 setHasMore(data.hasMore);
+                if (userId) {
+                  void saveCachedMessages(userId, data.messages);
+                }
               }}
               className="text-xs min-h-[36px] py-1.5 px-3.5"
             >
@@ -713,8 +822,31 @@ export function GroupChatPage() {
                 }}
                 onDelete={async (m, scope) => {
                   await messageApi.delete(m.id, scope);
+                  const deletedAt = new Date().toISOString();
                   if (scope === 'me') {
                     setMessages((prev) => prev.filter((item) => item.id !== m.id));
+                  } else {
+                    setMessages((prev) =>
+                      prev.map((item) =>
+                        item.id === m.id
+                          ? {
+                              ...item,
+                              deletedAt,
+                              content: 'This message was deleted',
+                              attachments: [],
+                              reactions: [],
+                            }
+                          : item
+                      )
+                    );
+                  }
+                  if (userId) {
+                    syncMessageDeleteCaches(userId, {
+                      id: m.id,
+                      conversationId: convId,
+                      deletedAt,
+                      scope,
+                    });
                   }
                   window.dispatchEvent(
                     new CustomEvent('blinkupz:shared-media-refresh', {
@@ -729,6 +861,13 @@ export function GroupChatPage() {
                       item.id === m.id ? { ...item, reactions: res.reactions } : item
                     )
                   );
+                  if (userId) {
+                    syncReactionCaches(userId, {
+                      messageId: m.id,
+                      conversationId: convId,
+                      reactions: res.reactions,
+                    });
+                  }
                 }}
                 onPin={
                   canPin
@@ -782,6 +921,9 @@ export function GroupChatPage() {
             const updated = await messageApi.edit(id, content, attachmentCaptions);
             setEditingMessage(null);
             setMessages((prev) => prev.map((m) => (m.id === updated.id ? updated : m)));
+            if (userId) {
+              syncMessageEditCaches(userId, updated);
+            }
             window.dispatchEvent(
               new CustomEvent('blinkupz:shared-media-refresh', {
                 detail: { conversationId: convId },
