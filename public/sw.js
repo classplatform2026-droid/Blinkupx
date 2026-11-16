@@ -1,6 +1,6 @@
-/* BlinkUpZ Unified Service Worker — Static Asset, Media & Shell Caching + Web Push */
+/* BlinkUpZ Unified Service Worker — PWA App Shell, Static Assets, Safe Media Caching & Web Push */
 
-const CACHE_VERSION = 'v2';
+const CACHE_VERSION = 'v3';
 const SHELL_CACHE = `blinkupz-shell-${CACHE_VERSION}`;
 const STATIC_CACHE = `blinkupz-static-${CACHE_VERSION}`;
 const MEDIA_CACHE = `blinkupz-media-${CACHE_VERSION}`;
@@ -9,6 +9,12 @@ const ACTIVE_CACHES = new Set([SHELL_CACHE, STATIC_CACHE, MEDIA_CACHE]);
 const SHELL_PRECACHE_URLS = [
   '/',
   '/manifest.webmanifest',
+  '/icon.svg',
+  '/pwa-192x192.png',
+  '/pwa-512x512.png',
+  '/pwa-maskable-192x192.png',
+  '/pwa-maskable-512x512.png',
+  '/apple-touch-icon.png',
   '/blinkupz-icon.png',
   '/blinkupz-badge.png',
 ];
@@ -59,7 +65,11 @@ self.addEventListener('install', (event) => {
           })
         );
       } finally {
-        await self.skipWaiting();
+        // Only activate immediately on first fresh install when no previous worker is active;
+        // existing controlled sessions wait safely until the user clicks "Update Now".
+        if (!self.registration || !self.registration.active) {
+          await self.skipWaiting();
+        }
       }
     })()
   );
@@ -102,6 +112,9 @@ function isStaticAssetRequest(url) {
     if (
       url.pathname.startsWith('/assets/') ||
       url.pathname === '/manifest.webmanifest' ||
+      url.pathname === '/icon.svg' ||
+      url.pathname === '/apple-touch-icon.png' ||
+      url.pathname.startsWith('/pwa-') ||
       url.pathname === '/blinkupz-icon.png' ||
       url.pathname === '/blinkupz-badge.png' ||
       /\.(?:js|css|woff2?|ttf|eot|svg|ico)$/i.test(url.pathname)
@@ -161,7 +174,7 @@ async function networkFirstNavigation(request) {
     const cachedShell = (await shellCache.match('/')) || (await caches.match(request));
     if (cachedShell) return cachedShell;
     return new Response(
-      '<!doctype html><html><body style="background:#181818;color:#fff;font-family:sans-serif;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0"><div style="text-align:center;padding:24px"><h2 style="margin:0 0 8px">You are offline</h2><p style="color:#999;font-size:14px;margin:0">Reconnect to the internet to load BlinkUpZ.</p></div></body></html>',
+      '<!doctype html><html lang="en"><head><meta charset="utf-8" /><meta name="viewport" content="width=device-width,initial-scale=1" /><meta name="theme-color" content="#181818" /><title>BlinkUpZ — Offline</title></head><body style="background:#181818;color:#fff;font-family:system-ui,-apple-system,sans-serif;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0;padding:24px"><div style="max-width:340px;width:100%;text-align:center;background:#202020;border:1px solid #303030;border-radius:16px;padding:24px"><h2 style="margin:0 0 8px;font-size:18px;font-weight:600">You are offline</h2><p style="color:#999999;font-size:13px;line-height:1.5;margin:0 0 18px">This page isn\'t cached yet. Check your internet connection and try again.</p><button onclick="window.location.reload()" style="background:#ffffff;color:#181818;border:none;border-radius:10px;padding:10px 18px;font-size:13px;font-weight:600;cursor:pointer">Try Again</button></div></body></html>',
       {
         status: 503,
         headers: { 'Content-Type': 'text/html; charset=utf-8' },
@@ -308,7 +321,7 @@ self.addEventListener('push', (event) => {
 
       const options = {
         body: payload.body || 'New notification',
-        icon: payload.icon || '/blinkupz-icon.png',
+        icon: payload.icon || '/pwa-192x192.png',
         badge: '/blinkupz-badge.png',
         tag:
           payload.tag ||

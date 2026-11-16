@@ -1,6 +1,7 @@
-import { MessageSquare, Users, Phone, User as UserIcon } from 'lucide-react';
+import { Download, MessageSquare, Phone, User as UserIcon, Users } from 'lucide-react';
 import { NavLink } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
+import { usePwa } from '../context/PwaContext';
 import { BrandMark } from './BrandMark';
 import { UserAvatar } from './UserAvatar';
 
@@ -13,6 +14,7 @@ const NAV_ITEMS = [
 
 export function Sidebar() {
   const { user } = useAuth();
+  const { canPromptInstall, isInstalled, installing, installApp } = usePwa();
 
   return (
     <aside
@@ -44,6 +46,21 @@ export function Sidebar() {
           </NavLink>
         ))}
       </nav>
+
+      {canPromptInstall && !isInstalled && (
+        <div className="px-2.5 lg:px-3 pb-3">
+          <button
+            type="button"
+            disabled={installing}
+            onClick={() => void installApp()}
+            aria-label="Install BlinkUpZ"
+            className="w-full flex items-center justify-center lg:justify-start gap-3 min-h-[42px] px-3 rounded-xl text-xs font-semibold bg-[#242424] text-[#FFFFFF] hover:bg-[#303030] border border-[#303030] transition-colors cursor-pointer whitespace-nowrap disabled:opacity-60"
+          >
+            <Download className="w-4 h-4 shrink-0" />
+            <span className="hidden lg:inline">Install App</span>
+          </button>
+        </div>
+      )}
 
       {user && (
         <div className="p-3 border-t border-[#303030]">

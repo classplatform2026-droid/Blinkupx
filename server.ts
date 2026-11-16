@@ -27,6 +27,19 @@ async function bootstrap() {
   const httpServer = http.createServer(app);
   initSocketServer(httpServer);
 
+  if (env.isProd) {
+    app.use((req, res, next) => {
+      const proto = req.headers['x-forwarded-proto'];
+      const host = req.headers.host || '';
+      const isLocalHost =
+        host.startsWith('localhost') || host.startsWith('127.0.0.1');
+      if (proto === 'http' && host && !isLocalHost) {
+        return res.redirect(301, `https://${host}${req.originalUrl}`);
+      }
+      next();
+    });
+  }
+
   app.use(
     helmet({
       contentSecurityPolicy: false,
@@ -96,6 +109,9 @@ async function bootstrap() {
           const normalized = filePath.replace(/\\/g, '/');
           if (normalized.endsWith('/sw.js') || normalized.endsWith('/index.html')) {
             res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+          } else if (normalized.endsWith('.webmanifest')) {
+            res.setHeader('Content-Type', 'application/manifest+json; charset=utf-8');
+            res.setHeader('Cache-Control', 'no-cache');
           } else if (normalized.includes('/assets/')) {
             res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
           } else {

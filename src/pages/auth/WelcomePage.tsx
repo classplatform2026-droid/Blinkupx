@@ -1,12 +1,15 @@
 import { useState } from 'react';
-import { ArrowRight, MessageSquare, ShieldCheck, Users } from 'lucide-react';
+import { ArrowRight, Download, MessageSquare, ShieldCheck, Users } from 'lucide-react';
 import { Link } from 'react-router-dom';
 import { BrandMark } from '../../components/BrandMark';
 import { Modal } from '../../components/Modal';
 import { PrimaryButton } from '../../components/PrimaryButton';
+import { usePwa } from '../../context/PwaContext';
 
 export function WelcomePage() {
   const [legalModal, setLegalModal] = useState<'terms' | 'privacy' | null>(null);
+  const { canPromptInstall, isInstalled, installing, browserInfo, installApp } =
+    usePwa();
 
   return (
     <div className="min-h-dvh bg-[#181818] text-[#FFFFFF] flex flex-col">
@@ -70,6 +73,17 @@ export function WelcomePage() {
                 Log In
               </PrimaryButton>
             </Link>
+            {!isInstalled && (canPromptInstall || browserInfo.isIOS) && (
+              <PrimaryButton
+                variant="secondary"
+                loading={installing}
+                onClick={() => void installApp()}
+                className="w-full sm:w-auto"
+              >
+                <Download className="w-4 h-4" />
+                <span>{browserInfo.isIOS ? 'Install on iOS' : 'Install App'}</span>
+              </PrimaryButton>
+            )}
           </div>
 
           <div className="pt-4 flex items-center gap-4 text-xs text-[#999999]">

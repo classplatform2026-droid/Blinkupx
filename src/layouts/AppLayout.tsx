@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { useLocation } from 'react-router-dom';
+import { AppUpdateBanner } from '../components/AppUpdateBanner';
 import { BottomNavigation } from '../components/BottomNavigation';
 import { OfflineBanner } from '../components/OfflineBanner';
 import { Sidebar } from '../components/Sidebar';
@@ -123,6 +124,7 @@ export function AppLayout({ children }: { children: React.ReactNode }) {
           showBottomNav ? 'pb-[calc(4.375rem+env(safe-area-inset-bottom))] md:pb-0' : ''
         }`}
       >
+        <AppUpdateBanner />
         <OfflineBanner />
         <div className="flex-1 min-h-0 flex flex-col overflow-hidden">
           {children}

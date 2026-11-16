@@ -4,12 +4,15 @@ import {
   Bell,
   ChevronRight,
   Database,
+  Download,
   Globe,
   HelpCircle,
   Info,
   MessageSquare,
   Palette,
+  RefreshCw,
   Shield,
+  Smartphone,
   Trash2,
 } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
@@ -17,6 +20,7 @@ import { AppHeader } from '../../components/AppHeader';
 import { Modal } from '../../components/Modal';
 import { PrimaryButton } from '../../components/PrimaryButton';
 import { useAuth } from '../../context/AuthContext';
+import { usePwa } from '../../context/PwaContext';
 import { useToast } from '../../context/ToastContext';
 import { extractApiError, userApi } from '../../services/api';
 import type { UserNotificationSettings, UserSettings } from '../../types';
@@ -43,6 +47,19 @@ export function AppSettingsPage() {
   const navigate = useNavigate();
   const { user, services, setAuthenticatedUser } = useAuth();
   const { showToast } = useToast();
+  const {
+    canPromptInstall,
+    isInstalled,
+    installing: installingPwa,
+    browserInfo,
+    installApp,
+    openInstallGuide,
+    updateAvailable,
+    updatingUpdate,
+    checkingUpdate,
+    applyUpdate,
+    checkForUpdates,
+  } = usePwa();
 
   const [savingKey, setSavingKey] = useState<string | null>(null);
   const [pushBusy, setPushBusy] = useState(false);
@@ -272,6 +289,100 @@ export function AppSettingsPage() {
               </div>
               <ChevronRight className="w-4 h-4 text-[#999999]" />
             </button>
+          </section>
+
+          {/* BlinkUpZ App & Updates (PWA) */}
+          <section className="rounded-2xl bg-[#202020] border border-[#303030] p-5 space-y-4">
+            <div className="flex items-center justify-between gap-2">
+              <div className="flex items-center gap-2.5">
+                <Smartphone className="w-4 h-4 text-[#999999]" />
+                <h2 className="text-sm font-semibold text-[#FFFFFF]">
+                  BlinkUpZ App &amp; Updates
+                </h2>
+              </div>
+              {isInstalled && (
+                <span className="text-[11px] font-medium text-[#22C55E]">
+                  Installed
+                </span>
+              )}
+            </div>
+
+            {!isInstalled ? (
+              <div className="flex items-center justify-between gap-4">
+                <div>
+                  <p className="text-sm text-[#FFFFFF]">Install BlinkUpZ</p>
+                  <p className="text-xs text-[#999999]">
+                    {canPromptInstall
+                      ? 'Add BlinkUpZ as a standalone app on your device'
+                      : browserInfo.isIOS
+                        ? 'Add to your iPhone or iPad Home Screen via Safari'
+                        : 'Run BlinkUpZ in a dedicated app window'}
+                  </p>
+                </div>
+                {canPromptInstall ? (
+                  <PrimaryButton
+                    loading={installingPwa}
+                    onClick={() => void installApp()}
+                    className="min-h-[40px] py-2 px-4 text-xs shrink-0 whitespace-nowrap"
+                  >
+                    <Download className="w-3.5 h-3.5" />
+                    <span>Install App</span>
+                  </PrimaryButton>
+                ) : (
+                  <PrimaryButton
+                    variant="secondary"
+                    onClick={openInstallGuide}
+                    className="min-h-[40px] py-2 px-4 text-xs shrink-0 whitespace-nowrap"
+                  >
+                    <Download className="w-3.5 h-3.5" />
+                    <span>{browserInfo.isIOS ? 'Install on iOS' : 'How to Install'}</span>
+                  </PrimaryButton>
+                )}
+              </div>
+            ) : (
+              <div className="flex items-center justify-between gap-4">
+                <div>
+                  <p className="text-sm text-[#FFFFFF]">Standalone App Mode</p>
+                  <p className="text-xs text-[#999999]">
+                    BlinkUpZ is installed and running as an app on this device
+                  </p>
+                </div>
+                <span className="text-xs font-medium text-[#22C55E] shrink-0">
+                  Active
+                </span>
+              </div>
+            )}
+
+            <div className="flex items-center justify-between gap-4 pt-3 border-t border-[#303030]">
+              <div>
+                <p className="text-sm text-[#FFFFFF]">App Version &amp; Updates</p>
+                <p className="text-xs text-[#999999]">
+                  {updateAvailable
+                    ? 'A new version is ready to activate safely'
+                    : 'Check for newer cached app versions'}
+                </p>
+              </div>
+              {updateAvailable ? (
+                <PrimaryButton
+                  loading={updatingUpdate}
+                  onClick={() => void applyUpdate()}
+                  className="min-h-[38px] py-1.5 px-3.5 text-xs shrink-0 whitespace-nowrap"
+                >
+                  <RefreshCw className="w-3.5 h-3.5" />
+                  <span>Update Now</span>
+                </PrimaryButton>
+              ) : (
+                <PrimaryButton
+                  variant="secondary"
+                  loading={checkingUpdate}
+                  onClick={() => void checkForUpdates()}
+                  className="min-h-[38px] py-1.5 px-3.5 text-xs shrink-0 whitespace-nowrap"
+                >
+                  <RefreshCw className="w-3.5 h-3.5" />
+                  <span>Check</span>
+                </PrimaryButton>
+              )}
+            </div>
           </section>
 
           {/* Push & Notification Controls */}

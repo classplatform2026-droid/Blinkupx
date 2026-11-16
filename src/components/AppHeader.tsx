@@ -22,7 +22,7 @@ export function AppHeader({
   const navigate = useNavigate();
 
   return (
-    <header className="h-16 px-4 sm:px-5 flex items-center justify-between gap-3 border-b border-[#303030] bg-[#181818] shrink-0">
+    <header className="min-h-[calc(4rem+env(safe-area-inset-top))] pt-[env(safe-area-inset-top)] px-4 sm:px-5 flex items-center justify-between gap-3 border-b border-[#303030] bg-[#181818] shrink-0">
       <div className="flex items-center gap-3 min-w-0">
         {showBack && (
           <button

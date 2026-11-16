@@ -588,7 +588,7 @@ export function GroupChatPage() {
   return (
     <div className="flex-1 flex h-full bg-[#181818] overflow-hidden">
       <div className="flex-1 flex flex-col min-w-0 h-full bg-[#181818] overflow-hidden">
-      <header className="h-16 px-3 sm:px-5 flex items-center justify-between gap-2 sm:gap-3 border-b border-[#303030] shrink-0">
+      <header className="min-h-[calc(4rem+env(safe-area-inset-top))] pt-[env(safe-area-inset-top)] px-3 sm:px-5 flex items-center justify-between gap-2 sm:gap-3 border-b border-[#303030] shrink-0">
         <div className="flex items-center gap-2.5 sm:gap-3 min-w-0 flex-1">
           <button
             type="button"

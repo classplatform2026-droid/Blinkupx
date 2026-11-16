@@ -1,6 +1,8 @@
 import React from 'react';
 import { BrowserRouter, Navigate, Route, Routes, useSearchParams } from 'react-router-dom';
+import { BrandMark } from './components/BrandMark';
 import { AuthProvider, useAuth } from './context/AuthContext';
+import { PwaProvider } from './context/PwaContext';
 import { SocketProvider } from './context/SocketContext';
 import { ToastProvider } from './context/ToastContext';
 import { AppLayout } from './layouts/AppLayout';
@@ -29,9 +31,10 @@ import { PublicProfilePage } from './pages/profile/PublicProfilePage';
 
 function FullScreenLoader() {
   return (
-    <div className="min-h-dvh bg-[#181818] text-[#FFFFFF] flex items-center justify-center">
-      <div className="flex flex-col items-center gap-3">
-        <div className="w-8 h-8 rounded-full border-2 border-[#303030] border-t-[#FFFFFF] animate-spin" />
+    <div className="min-h-dvh bg-[#181818] text-[#FFFFFF] flex items-center justify-center px-6">
+      <div className="flex flex-col items-center gap-4">
+        <BrandMark size={44} />
+        <div className="w-6 h-6 rounded-full border-2 border-[#303030] border-t-[#FFFFFF] animate-spin" />
         <p className="text-xs text-[#999999]">Loading BlinkUpZ...</p>
       </div>
     </div>
@@ -72,8 +75,9 @@ export default function App() {
   return (
     <BrowserRouter>
       <ToastProvider>
-        <AuthProvider>
-          <SocketProvider>
+        <PwaProvider>
+          <AuthProvider>
+            <SocketProvider>
             <Routes>
               {/* A. Authentication — 4 Screens */}
               <Route
@@ -261,6 +265,7 @@ export default function App() {
             </Routes>
           </SocketProvider>
         </AuthProvider>
+        </PwaProvider>
       </ToastProvider>
     </BrowserRouter>
   );
