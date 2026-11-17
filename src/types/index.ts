@@ -160,6 +160,24 @@ export interface MediaUploadProgressItem {
   error?: string | null;
 }
 
+export type CallEventStatus =
+  | 'completed'
+  | 'missed'
+  | 'no_answer'
+  | 'rejected'
+  | 'cancelled'
+  | 'failed';
+
+export interface MessageCallEvent {
+  callId: string;
+  callType: 'voice' | 'video';
+  callStatus: CallEventStatus;
+  duration: number;
+  callerId: string;
+  receiverId: string;
+  timestamp: string;
+}
+
 export interface Message {
   id: string;
   conversationId: string;
@@ -172,7 +190,7 @@ export interface Message {
     avatar: string;
   } | null;
   content: string;
-  messageType: 'text' | 'image' | 'video' | 'document' | 'voice' | 'system';
+  messageType: 'text' | 'image' | 'video' | 'document' | 'voice' | 'system' | 'call_event';
   attachments: MessageAttachment[];
   links?: MessageLinkPreview[];
   replyTo: {
@@ -185,6 +203,7 @@ export interface Message {
     messageId: string;
     senderName: string;
   } | null;
+  callEvent?: MessageCallEvent | null;
   reactions: MessageReaction[];
   editedAt: string | null;
   deletedAt: string | null;

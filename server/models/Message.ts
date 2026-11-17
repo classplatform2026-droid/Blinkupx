@@ -1,7 +1,31 @@
 import mongoose, { type Document, Schema, type Types } from 'mongoose';
 
-export type MessageType = 'text' | 'image' | 'video' | 'document' | 'voice' | 'system';
+export type MessageType =
+  | 'text'
+  | 'image'
+  | 'video'
+  | 'document'
+  | 'voice'
+  | 'system'
+  | 'call_event';
 export type DeliveryStatus = 'sent' | 'delivered' | 'read';
+export type CallEventStatus =
+  | 'completed'
+  | 'missed'
+  | 'no_answer'
+  | 'rejected'
+  | 'cancelled'
+  | 'failed';
+
+export interface ICallEventMetadata {
+  callId: string;
+  callType: 'voice' | 'video';
+  callStatus: CallEventStatus;
+  duration: number;
+  callerId: Types.ObjectId;
+  receiverId: Types.ObjectId;
+  timestamp: Date;
+}
 
 export interface IMessageAttachment {
   url: string;
@@ -40,6 +64,7 @@ export interface IMessage extends Document {
     messageId: Types.ObjectId;
     senderName: string;
   } | null;
+  callEvent: ICallEventMetadata | null;
   reactions: IMessageReaction[];
   editedAt: Date | null;
   deletedAt: Date | null;
@@ -84,6 +109,23 @@ const reactionSchema = new Schema<IMessageReaction>(
   { _id: false }
 );
 
+const callEventSchema = new Schema<ICallEventMetadata>(
+  {
+    callId: { type: String, required: true, trim: true, maxlength: 120 },
+    callType: { type: String, enum: ['voice', 'video'], required: true },
+    callStatus: {
+      type: String,
+      enum: ['completed', 'missed', 'no_answer', 'rejected', 'cancelled', 'failed'],
+      required: true,
+    },
+    duration: { type: Number, default: 0, min: 0 },
+    callerId: { type: Schema.Types.ObjectId, ref: 'User', required: true },
+    receiverId: { type: Schema.Types.ObjectId, ref: 'User', required: true },
+    timestamp: { type: Date, default: Date.now },
+  },
+  { _id: false }
+);
+
 const messageSchema = new Schema<IMessage>(
   {
     conversationId: {
@@ -110,7 +152,7 @@ const messageSchema = new Schema<IMessage>(
     },
     messageType: {
       type: String,
-      enum: ['text', 'image', 'video', 'document', 'voice', 'system'],
+      enum: ['text', 'image', 'video', 'document', 'voice', 'system', 'call_event'],
       default: 'text',
     },
     attachments: {
@@ -131,6 +173,10 @@ const messageSchema = new Schema<IMessage>(
         messageId: { type: Schema.Types.ObjectId, ref: 'Message' },
         senderName: { type: String },
       },
+      default: null,
+    },
+    callEvent: {
+      type: callEventSchema,
       default: null,
     },
     reactions: {
@@ -166,6 +212,13 @@ messageSchema.index(
   {
     unique: true,
     partialFilterExpression: { clientMessageId: { $type: 'string' } },
+  }
+);
+messageSchema.index(
+  { conversationId: 1, 'callEvent.callId': 1 },
+  {
+    unique: true,
+    partialFilterExpression: { 'callEvent.callId': { $type: 'string' } },
   }
 );
 messageSchema.index({ content: 'text' });

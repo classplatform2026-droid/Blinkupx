@@ -4,11 +4,17 @@ import { Types } from 'mongoose';
 import type { Server } from 'socket.io';
 import { env, isLiveKitConfigured } from '../config/env.ts';
 import { CallHistory, type CallHistoryStatus } from '../models/CallHistory.ts';
-import { Conversation } from '../models/Conversation.ts';
+import { Conversation, type IConversation } from '../models/Conversation.ts';
+import { Message, type CallEventStatus } from '../models/Message.ts';
 import { User, type IUser } from '../models/User.ts';
 import { AppError } from '../utils/errors.ts';
 import { resolveUserSettings } from '../utils/serializers.ts';
-import { canViewPrivacyField, getBlockRelationship } from './privacyService.ts';
+import { serializeMessage } from './messageService.ts';
+import {
+  canViewPrivacyField,
+  getBlockRelationship,
+  PUBLIC_USER_SELECT,
+} from './privacyService.ts';
 
 export type CallType = 'voice' | 'video';
 
@@ -48,6 +54,7 @@ export interface CallSession {
   endedAt: Date | null;
   endReason: string;
   historyPersisted: boolean;
+  chatEventPersisted: boolean;
 }
 
 export interface SerializedCallSessionForUser {
@@ -149,12 +156,119 @@ function enforceCallInitiationRateLimit(userId: string): void {
   callInitRateMap.set(userId, recent);
 }
 
+function formatCallDurationClock(seconds: number): string {
+  const s = Math.max(0, Math.floor(seconds));
+  const mins = Math.floor(s / 60);
+  const rem = s % 60;
+  return `${String(mins).padStart(2, '0')}:${String(rem).padStart(2, '0')}`;
+}
+
+function computeSessionDurationSeconds(
+  session: CallSession,
+  callStatus: CallEventStatus
+): number {
+  if (callStatus !== 'completed' || !session.answeredAt) {
+    return 0;
+  }
+  const endedAt = session.endedAt || new Date();
+  if (endedAt.getTime() <= session.answeredAt.getTime()) {
+    return 0;
+  }
+  return Math.max(
+    1,
+    Math.round((endedAt.getTime() - session.answeredAt.getTime()) / 1000)
+  );
+}
+
+function resolveCallEventStatus(params: {
+  terminalState: 'ended' | 'rejected' | 'missed' | 'failed';
+  callerStatus: CallHistoryStatus;
+  session: CallSession;
+}): CallEventStatus {
+  if (params.callerStatus === 'completed' && params.session.answeredAt) {
+    return 'completed';
+  }
+  if (params.terminalState === 'rejected' || params.callerStatus === 'declined') {
+    return 'rejected';
+  }
+  if (params.callerStatus === 'cancelled') {
+    return 'cancelled';
+  }
+  if (params.terminalState === 'missed' || params.callerStatus === 'busy') {
+    return 'missed';
+  }
+  return 'failed';
+}
+
+function buildCallEventContent(params: {
+  callType: CallType;
+  callStatus: CallEventStatus;
+  duration: number;
+}): string {
+  const label = params.callType === 'video' ? 'Video call' : 'Voice call';
+  switch (params.callStatus) {
+    case 'completed':
+      return `${label} · ${formatCallDurationClock(params.duration)}`;
+    case 'missed':
+      return `Missed ${params.callType} call`;
+    case 'no_answer':
+      return 'No answer';
+    case 'rejected':
+      return 'Call declined';
+    case 'cancelled':
+      return 'Call cancelled';
+    case 'failed':
+    default:
+      return 'Call failed';
+  }
+}
+
+async function ensureDirectConversationForCall(
+  session: CallSession
+): Promise<IConversation | null> {
+  try {
+    const callerObjId = new Types.ObjectId(session.callerId);
+    const receiverObjId = new Types.ObjectId(session.receiverId);
+
+    if (session.conversationId && Types.ObjectId.isValid(session.conversationId)) {
+      const byId = await Conversation.findById(session.conversationId);
+      if (byId) return byId;
+    }
+
+    let conv = await Conversation.findOne({
+      type: 'direct',
+      'participants.userId': { $all: [callerObjId, receiverObjId] },
+    });
+
+    if (!conv) {
+      conv = await Conversation.create({
+        type: 'direct',
+        name: '',
+        avatar: '',
+        communityId: null,
+        participants: [
+          { userId: callerObjId, role: 'member' },
+          { userId: receiverObjId, role: 'member' },
+        ],
+        createdBy: callerObjId,
+      });
+    }
+
+    session.conversationId = conv._id.toString();
+    return conv;
+  } catch (err) {
+    console.error('[CallService] Failed to ensure direct conversation:', err);
+    return null;
+  }
+}
+
 async function persistCallHistoryRecords(params: {
   session: CallSession;
   callerStatus: CallHistoryStatus;
   receiverStatus: CallHistoryStatus;
   callerDirection?: 'outgoing' | 'missed';
   receiverDirection?: 'incoming' | 'missed';
+  durationSeconds?: number;
 }): Promise<void> {
   const { session } = params;
   if (session.historyPersisted) return;
@@ -162,9 +276,11 @@ async function persistCallHistoryRecords(params: {
 
   const endedAt = session.endedAt || new Date();
   const duration =
-    session.answeredAt && endedAt.getTime() > session.answeredAt.getTime()
-      ? Math.max(1, Math.round((endedAt.getTime() - session.answeredAt.getTime()) / 1000))
-      : 0;
+    typeof params.durationSeconds === 'number'
+      ? params.durationSeconds
+      : session.answeredAt && endedAt.getTime() > session.answeredAt.getTime()
+        ? Math.max(1, Math.round((endedAt.getTime() - session.answeredAt.getTime()) / 1000))
+        : 0;
 
   const convObjId =
     session.conversationId && Types.ObjectId.isValid(session.conversationId)
@@ -230,6 +346,98 @@ async function persistCallHistoryRecords(params: {
   }
 }
 
+async function persistAndBroadcastCallEventMessage(params: {
+  session: CallSession;
+  conv: IConversation | null;
+  callStatus: CallEventStatus;
+  duration: number;
+}): Promise<void> {
+  const { session, conv, callStatus, duration } = params;
+  if (session.chatEventPersisted || !conv) return;
+  session.chatEventPersisted = true;
+
+  const convId = conv._id.toString();
+  const callerObjId = new Types.ObjectId(session.callerId);
+  const receiverObjId = new Types.ObjectId(session.receiverId);
+  const clientMessageId = `call_event:${session.callId}`;
+  const content = buildCallEventContent({
+    callType: session.callType,
+    callStatus,
+    duration,
+  });
+  const eventTimestamp = session.endedAt || new Date();
+
+  try {
+    const existing = await Message.findOne({
+      conversationId: conv._id,
+      'callEvent.callId': session.callId,
+    });
+    if (existing) return;
+
+    let msg;
+    try {
+      msg = await Message.create({
+        conversationId: conv._id,
+        senderId: callerObjId,
+        clientMessageId,
+        content,
+        messageType: 'call_event',
+        attachments: [],
+        links: [],
+        replyTo: null,
+        forwardedFrom: null,
+        callEvent: {
+          callId: session.callId,
+          callType: session.callType,
+          callStatus,
+          duration,
+          callerId: callerObjId,
+          receiverId: receiverObjId,
+          timestamp: eventTimestamp,
+        },
+        deliveredTo: [],
+        readBy: [callerObjId],
+        deliveryStatus: 'sent',
+      });
+    } catch (err: unknown) {
+      if ((err as { code?: number })?.code === 11000) {
+        return;
+      }
+      throw err;
+    }
+
+    conv.lastMessage = {
+      messageId: msg._id as Types.ObjectId,
+      senderId: callerObjId,
+      content: content.slice(0, 140),
+      messageType: 'call_event',
+      createdAt: msg.createdAt,
+    };
+    for (const part of conv.participants) {
+      part.deletedAt = null;
+    }
+    await conv.save();
+
+    const populated = await Message.findById(msg._id).populate('senderId', PUBLIC_USER_SELECT);
+    if (!populated) return;
+
+    const serialized = serializeMessage(populated);
+    if (ioRef) {
+      ioRef.to(`conversation:${convId}`).emit('message:new', serialized);
+      ioRef.to(`user:${session.callerId}`).emit('conversation:activity', {
+        conversationId: convId,
+        message: serialized,
+      });
+      ioRef.to(`user:${session.receiverId}`).emit('conversation:activity', {
+        conversationId: convId,
+        message: serialized,
+      });
+    }
+  } catch (err) {
+    console.error('[CallService] Failed to create call event message:', err);
+  }
+}
+
 function cleanupSession(session: CallSession): void {
   clearRingTimer(session.callId);
   clearDisconnectTimer(session.callerId);
@@ -265,12 +473,28 @@ async function finalizeSession(params: {
 
   cleanupSession(session);
 
+  const callStatus = resolveCallEventStatus({
+    terminalState,
+    callerStatus: params.callerStatus,
+    session,
+  });
+  const duration = computeSessionDurationSeconds(session, callStatus);
+  const conv = await ensureDirectConversationForCall(session);
+
   await persistCallHistoryRecords({
     session,
     callerStatus: params.callerStatus,
     receiverStatus: params.receiverStatus,
     callerDirection: params.callerDirection,
     receiverDirection: params.receiverDirection,
+    durationSeconds: duration,
+  });
+
+  await persistAndBroadcastCallEventMessage({
+    session,
+    conv,
+    callStatus,
+    duration,
   });
 
   const eventsToEmit = params.eventNames || ['call:ended'];
@@ -437,14 +661,23 @@ export async function initiateCall(params: {
       endedAt: now,
       endReason: 'Recipient is on another call',
       historyPersisted: false,
+      chatEventPersisted: false,
     };
 
+    const busyConv = await ensureDirectConversationForCall(busySession);
     await persistCallHistoryRecords({
       session: busySession,
       callerStatus: 'busy',
       receiverStatus: 'missed',
       callerDirection: 'outgoing',
       receiverDirection: 'missed',
+      durationSeconds: 0,
+    });
+    await persistAndBroadcastCallEventMessage({
+      session: busySession,
+      conv: busyConv,
+      callStatus: 'missed',
+      duration: 0,
     });
 
     emitToUser(callerId, 'call:busy', serializeSessionFor(busySession, callerId));
@@ -469,6 +702,7 @@ export async function initiateCall(params: {
     endedAt: null,
     endReason: '',
     historyPersisted: false,
+    chatEventPersisted: false,
   };
 
   activeCalls.set(callId, session);

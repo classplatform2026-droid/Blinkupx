@@ -75,6 +75,18 @@ export function serializeMessage(msg: IMessage, viewerContext?: ViewerRelationsh
         }
       : null,
     forwardedFrom: isDeleted ? null : msg.forwardedFrom,
+    callEvent:
+      !isDeleted && msg.callEvent && msg.callEvent.callId
+        ? {
+            callId: msg.callEvent.callId,
+            callType: msg.callEvent.callType,
+            callStatus: msg.callEvent.callStatus,
+            duration: msg.callEvent.duration || 0,
+            callerId: msg.callEvent.callerId.toString(),
+            receiverId: msg.callEvent.receiverId.toString(),
+            timestamp: msg.callEvent.timestamp || msg.createdAt,
+          }
+        : null,
     reactions: isDeleted
       ? []
       : msg.reactions.map((r) => ({

@@ -218,8 +218,11 @@ export function SocketProvider({ children }: { children: React.ReactNode }) {
     });
     socketRef.current = s;
 
-    const acknowledgeDelivered = (msg?: Pick<Message, 'id' | 'conversationId' | 'senderId'>) => {
+    const acknowledgeDelivered = (
+      msg?: Pick<Message, 'id' | 'conversationId' | 'senderId' | 'messageType'>
+    ) => {
       if (!msg?.id || !msg.conversationId || msg.senderId === currentUserId) return;
+      if (msg.messageType === 'system' || msg.messageType === 'call_event') return;
       if (ackedDeliveredIdsRef.current.has(msg.id)) return;
       ackedDeliveredIdsRef.current.add(msg.id);
       if (ackedDeliveredIdsRef.current.size > 250) {

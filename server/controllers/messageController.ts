@@ -145,7 +145,7 @@ export async function editMessage(req: AuthenticatedRequest, res: Response) {
   if (msg.deletedAt) {
     throw new AppError('Deleted messages cannot be edited.', 400, 'BAD_REQUEST');
   }
-  if (msg.messageType === 'system' || msg.messageType === 'voice') {
+  if (msg.messageType === 'system' || msg.messageType === 'call_event' || msg.messageType === 'voice') {
     throw new AppError('This message type cannot be edited.', 400, 'BAD_REQUEST');
   }
   if (msg.messageType === 'text' && !parsed.content.trim()) {

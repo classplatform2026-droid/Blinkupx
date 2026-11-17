@@ -69,6 +69,10 @@ async function formatConversation(
     createdAt: { $gt: selfPart?.lastReadAt || new Date(0) },
     deletedAt: null,
     deletedFor: { $ne: currentUserId },
+    $or: [
+      { messageType: { $ne: 'call_event' } },
+      { messageType: 'call_event', 'callEvent.callStatus': 'missed' },
+    ],
   });
 
   let pinnedMessage = null;

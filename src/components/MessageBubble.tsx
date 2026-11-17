@@ -13,12 +13,19 @@ import {
   Info,
   Loader2,
   MoreHorizontal,
+  Phone,
+  PhoneMissed,
+  PhoneOff,
+  PhoneOutgoing,
   Pin,
   Reply,
   RotateCcw,
   SmilePlus,
   Trash2,
+  Video,
+  VideoOff,
 } from 'lucide-react';
+import { useAuth } from '../context/AuthContext';
 import { useToast } from '../context/ToastContext';
 import type { MediaUploadProgressItem, Message, MessageAttachment } from '../types';
 import { extractApiError, mediaApi } from '../services/api';
@@ -170,6 +177,7 @@ export function MessageBubble({
   onRetry,
   onDismissFailed,
 }: MessageBubbleProps) {
+  const { user } = useAuth();
   const { showToast } = useToast();
   const [menuOpen, setMenuOpen] = useState(false);
   const [reactOpen, setReactOpen] = useState(false);
@@ -207,10 +215,117 @@ export function MessageBubble({
 
   if (message.messageType === 'system') {
     return (
-      <div className="flex justify-center my-2 px-4">
+      <div id={`msg-${message.id}`} className="flex justify-center my-2 px-4">
         <span className="text-xs text-[#999999] text-center py-1 px-3 rounded-lg bg-[#202020] border border-[#303030]">
           {message.content}
         </span>
+      </div>
+    );
+  }
+
+  if (message.messageType === 'call_event') {
+    const ce = message.callEvent;
+    const currentUserId = user?.id || '';
+    const isCaller = Boolean(
+      currentUserId && (ce?.callerId === currentUserId || message.senderId === currentUserId)
+    );
+    const callType = ce?.callType || (/video/i.test(message.content) ? 'video' : 'voice');
+    const callStatus =
+      ce?.callStatus ||
+      (/missed/i.test(message.content)
+        ? 'missed'
+        : /declin|reject/i.test(message.content)
+          ? 'rejected'
+          : /cancel/i.test(message.content)
+            ? 'cancelled'
+            : /fail/i.test(message.content)
+              ? 'failed'
+              : 'completed');
+
+    const isMissedForReceiver =
+      (callStatus === 'missed' || callStatus === 'no_answer') && !isCaller;
+    const isUnansweredOutgoing =
+      (callStatus === 'missed' || callStatus === 'no_answer') && isCaller;
+    const isCompleted = callStatus === 'completed';
+
+    let primaryLabel = '';
+    if (isCompleted) {
+      const durationStr = formatDuration(ce?.duration || 0);
+      primaryLabel = `${callType === 'video' ? 'Video call' : 'Voice call'} · ${durationStr}`;
+    } else if (isMissedForReceiver) {
+      primaryLabel = callType === 'video' ? 'Missed video call' : 'Missed voice call';
+    } else if (isUnansweredOutgoing) {
+      primaryLabel = 'No answer';
+    } else if (callStatus === 'rejected') {
+      primaryLabel = 'Call declined';
+    } else if (callStatus === 'cancelled') {
+      primaryLabel = 'Call cancelled';
+    } else {
+      primaryLabel = 'Call failed';
+    }
+
+    const timeLabel = formatTime(ce?.timestamp || message.createdAt);
+    const secondaryLabel =
+      isCompleted || isMissedForReceiver
+        ? timeLabel
+        : `${callType === 'video' ? 'Video call' : 'Voice call'} · ${timeLabel}`;
+
+    const IconComponent = isMissedForReceiver
+      ? callType === 'video'
+        ? VideoOff
+        : PhoneMissed
+      : isUnansweredOutgoing
+        ? callType === 'video'
+          ? Video
+          : PhoneOutgoing
+        : callStatus === 'rejected' || callStatus === 'cancelled' || callStatus === 'failed'
+          ? callType === 'video'
+            ? VideoOff
+            : PhoneOff
+          : callType === 'video'
+            ? Video
+            : Phone;
+
+    return (
+      <div
+        id={`msg-${message.id}`}
+        className={`flex justify-center my-2 px-4 ${
+          highlighted ? 'bg-[#242424]/70 rounded-xl py-1 transition-colors duration-500' : ''
+        }`}
+      >
+        <div
+          className={`inline-flex items-center gap-3 px-3.5 py-2.5 rounded-2xl border max-w-[90%] sm:max-w-[340px] ${
+            isMissedForReceiver
+              ? 'bg-[#23191A] border-[#E5484D]/45'
+              : 'bg-[#202020] border-[#303030]'
+          }`}
+        >
+          <div
+            className={`w-8 h-8 rounded-xl flex items-center justify-center shrink-0 ${
+              isMissedForReceiver
+                ? 'bg-[#E5484D]/15 text-[#E5484D]'
+                : callStatus === 'failed'
+                  ? 'bg-[#E5484D]/10 text-[#E5484D]'
+                  : isCompleted
+                    ? 'bg-[#22C55E]/15 text-[#22C55E]'
+                    : 'bg-[#2A2A2A] text-[#CCCCCC]'
+            }`}
+          >
+            <IconComponent className="w-4 h-4" />
+          </div>
+          <div className="min-w-0 flex-1">
+            <p
+              className={`text-xs font-semibold truncate ${
+                isMissedForReceiver ? 'text-[#F87171]' : 'text-[#FFFFFF]'
+              }`}
+            >
+              {primaryLabel}
+            </p>
+            <p className="text-[11px] text-[#999999] font-mono tabular-nums truncate mt-0.5">
+              {secondaryLabel}
+            </p>
+          </div>
+        </div>
       </div>
     );
   }

@@ -139,7 +139,9 @@ export function syncIncomingMessageCaches(userId: string, msg: Message): void {
                 ? 'Video'
                 : msg.messageType === 'document'
                   ? 'Document'
-                  : '');
+                  : msg.messageType === 'call_event'
+                    ? 'Call'
+                    : '');
         const updatedConv: Conversation = {
           ...target,
           lastMessage: {

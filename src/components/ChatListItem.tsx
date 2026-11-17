@@ -1,5 +1,15 @@
 import React, { useRef, useState } from 'react';
-import { BellOff, MoreVertical, Pin, Archive, Trash2 } from 'lucide-react';
+import {
+  Archive,
+  BellOff,
+  MoreVertical,
+  Phone,
+  PhoneMissed,
+  Pin,
+  Trash2,
+  Video,
+} from 'lucide-react';
+import { useAuth } from '../context/AuthContext';
 import type { Conversation } from '../types';
 import { formatConversationTime } from '../utils/formatters';
 import { DropdownMenu } from './DropdownMenu';
@@ -22,6 +32,7 @@ export function ChatListItem({
   onSelect,
   onAction,
 }: ChatListItemProps) {
+  const { user } = useAuth();
   const [contextPos, setContextPos] = useState<{ x: number; y: number } | null>(null);
   const longPressTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -116,17 +127,49 @@ export function ChatListItem({
           </div>
 
           <div className="flex items-center justify-between gap-2 mt-0.5">
-            <p
-              className={`text-xs truncate ${
-                typingText ? 'text-[#22C55E] font-medium' : 'text-[#999999]'
-              }`}
-            >
-              {typingText ||
-                conversation.lastMessage?.content ||
+            {(() => {
+              const lastMsg = conversation.lastMessage;
+              const isCallEvent = lastMsg?.messageType === 'call_event';
+              const rawContent = lastMsg?.content || '';
+              const isMissedRaw = /^Missed (voice|video) call$/i.test(rawContent);
+              const isCaller = Boolean(user?.id && lastMsg?.senderId === user.id);
+              const isMissedForViewer = isCallEvent && isMissedRaw && !isCaller;
+              const isVideoCall = /video/i.test(rawContent);
+              const callPreviewText =
+                isCallEvent && isMissedRaw && isCaller ? 'No answer' : rawContent;
+
+              const previewString =
+                typingText ||
+                (isCallEvent ? callPreviewText : rawContent) ||
                 (conversation.type === 'direct' && conversation.username
                   ? `@${conversation.username}`
-                  : 'No messages yet')}
-            </p>
+                  : 'No messages yet');
+
+              return (
+                <p
+                  className={`flex items-center gap-1.5 text-xs min-w-0 truncate ${
+                    typingText
+                      ? 'text-[#22C55E] font-medium'
+                      : isMissedForViewer
+                        ? 'text-[#E5484D] font-medium'
+                        : 'text-[#999999]'
+                  }`}
+                >
+                  {!typingText && isCallEvent && (
+                    <span className="shrink-0 inline-flex items-center" aria-hidden="true">
+                      {isMissedForViewer ? (
+                        <PhoneMissed className="w-3.5 h-3.5 text-[#E5484D]" />
+                      ) : isVideoCall ? (
+                        <Video className="w-3.5 h-3.5 text-[#999999]" />
+                      ) : (
+                        <Phone className="w-3.5 h-3.5 text-[#999999]" />
+                      )}
+                    </span>
+                  )}
+                  <span className="truncate">{previewString}</span>
+                </p>
+              );
+            })()}
             {conversation.unreadCount > 0 && (
               <span className="text-xs font-mono tabular-nums font-semibold text-[#FFFFFF] bg-[#303030] px-1.5 py-0.5 rounded-md shrink-0">
                 {conversation.unreadCount > 99 ? '99+' : conversation.unreadCount}

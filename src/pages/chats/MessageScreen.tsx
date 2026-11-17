@@ -519,7 +519,8 @@ export function MessageScreen({ conversationId }: { conversationId: string }) {
         conversationId: targetConvId,
         content: forwardingMessage.content,
         messageType:
-          forwardingMessage.messageType === 'system'
+          forwardingMessage.messageType === 'system' ||
+          forwardingMessage.messageType === 'call_event'
             ? 'text'
             : forwardingMessage.messageType,
         attachments: forwardingMessage.attachments,

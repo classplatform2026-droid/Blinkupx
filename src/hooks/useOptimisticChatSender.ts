@@ -533,7 +533,9 @@ export function useOptimisticChatSender({
         content: msg.retryPayload?.content ?? msg.content,
         messageType:
           msg.retryPayload?.messageType ??
-          (msg.messageType === 'system' ? 'text' : msg.messageType),
+          (msg.messageType === 'system' || msg.messageType === 'call_event'
+            ? 'text'
+            : msg.messageType),
         attachments: localItemsRef.current[cid]
           ? undefined
           : msg.retryPayload?.attachments ?? msg.attachments,
