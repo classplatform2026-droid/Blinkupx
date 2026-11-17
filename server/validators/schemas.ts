@@ -233,3 +233,26 @@ export const handleJoinRequestSchema = z.object({
 export const transferOwnershipSchema = z.object({
   newOwnerId: z.string().min(1, 'New owner is required'),
 });
+
+export const callTypeSchema = z.enum(['voice', 'video']);
+
+export const callTokenSchema = z.object({
+  callId: z.string().trim().min(6, 'Valid callId is required').max(120),
+});
+
+export const callInitiateSchema = z.object({
+  recipientId: z.string().trim().min(1, 'Recipient user ID is required'),
+  callType: callTypeSchema,
+  conversationId: z.string().trim().optional().nullable(),
+});
+
+export const callActionSchema = z.object({
+  callId: z.string().trim().min(6, 'Valid callId is required').max(120),
+  reason: z.string().trim().max(200).optional(),
+});
+
+export const callStateReportSchema = z.object({
+  callId: z.string().trim().min(6, 'Valid callId is required').max(120),
+  state: z.enum(['connecting', 'connected', 'reconnecting', 'failed']),
+  reason: z.string().trim().max(200).optional(),
+});

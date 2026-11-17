@@ -27,6 +27,7 @@ import { SharedMediaPanel } from '../../components/SharedMediaPanel';
 import { EmptyState, ErrorState, LoadingState } from '../../components/States';
 import { UserAvatar } from '../../components/UserAvatar';
 import { useAuth } from '../../context/AuthContext';
+import { useCall } from '../../context/CallContext';
 import { useSocket } from '../../context/SocketContext';
 import { useToast } from '../../context/ToastContext';
 import { useOptimisticChatSender } from '../../hooks/useOptimisticChatSender';
@@ -62,6 +63,7 @@ export function MessageScreen({ conversationId }: { conversationId: string }) {
   const highlightId = searchParams.get('highlight');
 
   const { user, setAuthenticatedUser } = useAuth();
+  const { startCall } = useCall();
   const { socket, presenceMap, typingMap } = useSocket();
   const { showToast } = useToast();
   const qc = useQueryClient();
@@ -79,7 +81,6 @@ export function MessageScreen({ conversationId }: { conversationId: string }) {
     message: Message;
     index: number;
   } | null>(null);
-  const [callUnavailableModal, setCallUnavailableModal] = useState<'voice' | 'video' | null>(null);
   const [blockModalOpen, setBlockModalOpen] = useState(false);
   const [blockBusy, setBlockBusy] = useState(false);
 
@@ -720,21 +721,57 @@ export function MessageScreen({ conversationId }: { conversationId: string }) {
         </div>
 
         <div className="flex items-center gap-0.5 sm:gap-1 shrink-0">
-          {conversation.type === 'direct' && (
+          {conversation.type === 'direct' && peer && (
             <>
               <button
                 type="button"
-                onClick={() => setCallUnavailableModal('voice')}
+                disabled={isBlockedPair}
+                onClick={() => {
+                  if (isBlockedPair) {
+                    showToast('Cannot call a blocked contact.', 'error');
+                    return;
+                  }
+                  void startCall({
+                    recipientId: peer.userId,
+                    callType: 'voice',
+                    conversationId,
+                    peerHint: {
+                      id: peer.userId,
+                      fullName: conversation.name,
+                      username: conversation.username,
+                      avatar: conversation.avatar,
+                    },
+                  });
+                }}
                 aria-label="Voice call"
-                className="min-w-[40px] min-h-[40px] rounded-xl flex items-center justify-center text-[#999999] hover:text-[#FFFFFF] hover:bg-[#242424] transition-colors cursor-pointer"
+                title={isBlockedPair ? 'Calling unavailable' : 'Start voice call'}
+                className="min-w-[40px] min-h-[40px] rounded-xl flex items-center justify-center text-[#999999] hover:text-[#FFFFFF] hover:bg-[#242424] disabled:opacity-40 disabled:cursor-not-allowed transition-colors cursor-pointer"
               >
                 <Phone className="w-4 h-4" />
               </button>
               <button
                 type="button"
-                onClick={() => setCallUnavailableModal('video')}
+                disabled={isBlockedPair}
+                onClick={() => {
+                  if (isBlockedPair) {
+                    showToast('Cannot call a blocked contact.', 'error');
+                    return;
+                  }
+                  void startCall({
+                    recipientId: peer.userId,
+                    callType: 'video',
+                    conversationId,
+                    peerHint: {
+                      id: peer.userId,
+                      fullName: conversation.name,
+                      username: conversation.username,
+                      avatar: conversation.avatar,
+                    },
+                  });
+                }}
                 aria-label="Video call"
-                className="min-w-[40px] min-h-[40px] rounded-xl flex items-center justify-center text-[#999999] hover:text-[#FFFFFF] hover:bg-[#242424] transition-colors cursor-pointer"
+                title={isBlockedPair ? 'Calling unavailable' : 'Start video call'}
+                className="min-w-[40px] min-h-[40px] rounded-xl flex items-center justify-center text-[#999999] hover:text-[#FFFFFF] hover:bg-[#242424] disabled:opacity-40 disabled:cursor-not-allowed transition-colors cursor-pointer"
               >
                 <Video className="w-4 h-4" />
               </button>
@@ -1093,37 +1130,6 @@ export function MessageScreen({ conversationId }: { conversationId: string }) {
         initialIndex={galleryPreview?.index || 0}
         onClose={() => setGalleryPreview(null)}
       />
-
-      {/* V1.0 Calling Info Modal */}
-      <Modal
-        open={callUnavailableModal !== null}
-        onClose={() => setCallUnavailableModal(null)}
-        title={
-          callUnavailableModal === 'video'
-            ? 'Video Calling — V1.0 Notice'
-            : 'Voice Calling — V1.0 Notice'
-        }
-      >
-        <div className="space-y-4">
-          <p className="text-sm text-[#999999] leading-relaxed">
-            Live {callUnavailableModal} calling is not included in BlinkUpZ V1.0. You can view and manage your call logs in the Call History tab, or send instant voice messages directly in this chat.
-          </p>
-          <div className="flex justify-end gap-2">
-            <PrimaryButton
-              variant="secondary"
-              onClick={() => {
-                setCallUnavailableModal(null);
-                navigate('/calls');
-              }}
-            >
-              Open Call History
-            </PrimaryButton>
-            <PrimaryButton onClick={() => setCallUnavailableModal(null)}>
-              Got it
-            </PrimaryButton>
-          </div>
-        </div>
-      </Modal>
       </div>
 
       <SharedMediaPanel

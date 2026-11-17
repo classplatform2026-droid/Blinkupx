@@ -1,6 +1,8 @@
 import axios from 'axios';
 import type {
   CallHistoryItem,
+  CallSessionSnapshot,
+  CallTokenResponse,
   CommunityDetail,
   CommunityMembersResponse,
   CommunitySettings,
@@ -629,6 +631,20 @@ export const communityApi = {
 };
 
 export const callApi = {
+  getToken: async (callId: string) => {
+    const res = await api.post<{ success: boolean; data: CallTokenResponse }>(
+      '/calls/token',
+      { callId }
+    );
+    return res.data.data;
+  },
+  getActive: async () => {
+    const res = await api.get<{
+      success: boolean;
+      data: CallSessionSnapshot | null;
+    }>('/calls/active');
+    return res.data.data;
+  },
   listHistory: async (filter: 'all' | 'missed' = 'all', q = '') => {
     const res = await api.get<{ success: boolean; data: CallHistoryItem[] }>(
       '/calls/history',

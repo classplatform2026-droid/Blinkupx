@@ -1,7 +1,9 @@
 import React from 'react';
 import { BrowserRouter, Navigate, Route, Routes, useSearchParams } from 'react-router-dom';
 import { BrandMark } from './components/BrandMark';
+import { CallOverlay } from './components/CallOverlay';
 import { AuthProvider, useAuth } from './context/AuthContext';
+import { CallProvider } from './context/CallContext';
 import { PwaProvider } from './context/PwaContext';
 import { SocketProvider } from './context/SocketContext';
 import { ToastProvider } from './context/ToastContext';
@@ -78,7 +80,9 @@ export default function App() {
         <PwaProvider>
           <AuthProvider>
             <SocketProvider>
-            <Routes>
+              <CallProvider>
+                <CallOverlay />
+                <Routes>
               {/* A. Authentication — 4 Screens */}
               <Route
                 path="/"
@@ -263,6 +267,7 @@ export default function App() {
 
               <Route path="*" element={<Navigate to="/" replace />} />
             </Routes>
+              </CallProvider>
           </SocketProvider>
         </AuthProvider>
         </PwaProvider>

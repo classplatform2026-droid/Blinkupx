@@ -176,3 +176,76 @@ export function showBrowserNotification(params: {
     return false;
   }
 }
+
+let activeCallToneTimer: ReturnType<typeof setInterval> | null = null;
+
+export function stopCallTones(): void {
+  if (activeCallToneTimer) {
+    clearInterval(activeCallToneTimer);
+    activeCallToneTimer = null;
+  }
+}
+
+export function startOutgoingRingback(enabled = true): void {
+  stopCallTones();
+  if (!enabled) return;
+
+  const playBurst = () => {
+    try {
+      const ctx = getAudioContext();
+      if (!ctx) return;
+      const now = ctx.currentTime;
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = 'sine';
+      osc.frequency.setValueAtTime(440, now);
+      gain.gain.setValueAtTime(0.0001, now);
+      gain.gain.linearRampToValueAtTime(0.035, now + 0.04);
+      gain.gain.setValueAtTime(0.035, now + 0.72);
+      gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.82);
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.start(now);
+      osc.stop(now + 0.85);
+    } catch {
+      // Ignore Web Audio autoplay restriction
+    }
+  };
+
+  playBurst();
+  activeCallToneTimer = setInterval(playBurst, 2600);
+}
+
+export function startIncomingRingtone(enabled = true): void {
+  stopCallTones();
+  if (!enabled) return;
+
+  const playRing = () => {
+    try {
+      const ctx = getAudioContext();
+      if (!ctx) return;
+      const now = ctx.currentTime;
+      const playPair = (offset: number, f1: number, f2: number) => {
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc.type = 'sine';
+        osc.frequency.setValueAtTime(f1, now + offset);
+        osc.frequency.setValueAtTime(f2, now + offset + 0.14);
+        gain.gain.setValueAtTime(0.0001, now + offset);
+        gain.gain.linearRampToValueAtTime(0.065, now + offset + 0.02);
+        gain.gain.exponentialRampToValueAtTime(0.0001, now + offset + 0.34);
+        osc.connect(gain);
+        gain.connect(ctx.destination);
+        osc.start(now + offset);
+        osc.stop(now + offset + 0.36);
+      };
+      playPair(0, 659.25, 880);
+      playPair(0.42, 659.25, 880);
+    } catch {
+      // Ignore Web Audio autoplay restriction
+    }
+  };
+
+  playRing();
+  activeCallToneTimer = setInterval(playRing, 2400);
+}

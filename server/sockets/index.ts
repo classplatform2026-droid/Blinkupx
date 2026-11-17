@@ -8,10 +8,27 @@ import { AUTH_COOKIE_NAME, type JwtPayload } from '../middleware/auth.ts';
 import { Conversation } from '../models/Conversation.ts';
 import { Message } from '../models/Message.ts';
 import { User } from '../models/User.ts';
+import {
+  acceptCall,
+  acknowledgeRinging,
+  cancelCall,
+  configureCallSignalingRuntime,
+  endCall,
+  handleUserCallDisconnect,
+  handleUserCallReconnect,
+  initiateCall,
+  rejectCall,
+  reportClientCallState,
+} from '../services/callService.ts';
 import { createAndDispatchMessage } from '../services/messageService.ts';
 import { canViewPrivacyField, getBlockRelationship } from '../services/privacyService.ts';
 import { AppError } from '../utils/errors.ts';
 import { resolveUserSettings } from '../utils/serializers.ts';
+import {
+  callActionSchema,
+  callInitiateSchema,
+  callStateReportSchema,
+} from '../validators/schemas.ts';
 
 let ioInstance: Server | null = null;
 const userSockets = new Map<string, Set<string>>();
@@ -193,6 +210,11 @@ export function initSocketServer(httpServer: HttpServer): Server {
 
     // Join personal room for direct notifications & sync
     socket.join(`user:${userId}`);
+
+    const activeCallOnConnect = handleUserCallReconnect(userId);
+    if (activeCallOnConnect) {
+      socket.emit('call:sync', activeCallOnConnect);
+    }
 
     void (async () => {
       const conversations = await Conversation.find({
@@ -679,6 +701,150 @@ export function initSocketServer(httpServer: HttpServer): Server {
       }
     );
 
+    const formatSocketErr = (err: unknown) => {
+      if (err instanceof AppError) {
+        return { ok: false, code: err.code, message: err.message };
+      }
+      if (err instanceof ZodError) {
+        return {
+          ok: false,
+          code: 'VALIDATION_ERROR',
+          message: err.issues[0]?.message || 'Invalid call payload.',
+        };
+      }
+      return { ok: false, code: 'CALL_ERROR', message: 'Call action failed.' };
+    };
+
+    socket.on(
+      'call:initiate',
+      async (
+        payload: unknown,
+        ack?: (res: { ok: boolean; data?: unknown; code?: string; message?: string }) => void
+      ) => {
+        try {
+          const parsed = callInitiateSchema.parse(payload);
+          const session = await initiateCall({
+            callerId: userId,
+            recipientId: parsed.recipientId,
+            callType: parsed.callType,
+            conversationId: parsed.conversationId,
+          });
+          ack?.({ ok: true, data: session });
+        } catch (err) {
+          ack?.(formatSocketErr(err));
+        }
+      }
+    );
+
+    socket.on('call:ringing', (payload: unknown) => {
+      try {
+        const parsed = callActionSchema.parse(payload);
+        acknowledgeRinging({ userId, callId: parsed.callId });
+      } catch {
+        // Ignore invalid ringing ack
+      }
+    });
+
+    socket.on(
+      'call:accept',
+      async (
+        payload: unknown,
+        ack?: (res: { ok: boolean; data?: unknown; code?: string; message?: string }) => void
+      ) => {
+        try {
+          const parsed = callActionSchema.parse(payload);
+          const session = await acceptCall({
+            userId,
+            callId: parsed.callId,
+            socketId: socket.id,
+          });
+          ack?.({ ok: true, data: session });
+        } catch (err) {
+          ack?.(formatSocketErr(err));
+        }
+      }
+    );
+
+    const handleRejectOrDecline = async (
+      payload: unknown,
+      ack?: (res: { ok: boolean; data?: unknown; code?: string; message?: string }) => void
+    ) => {
+      try {
+        const parsed = callActionSchema.parse(payload);
+        const session = await rejectCall({
+          userId,
+          callId: parsed.callId,
+          reason: parsed.reason,
+        });
+        ack?.({ ok: true, data: session });
+      } catch (err) {
+        ack?.(formatSocketErr(err));
+      }
+    };
+    socket.on('call:reject', handleRejectOrDecline);
+    socket.on('call:decline', handleRejectOrDecline);
+
+    socket.on(
+      'call:cancel',
+      async (
+        payload: unknown,
+        ack?: (res: { ok: boolean; data?: unknown; code?: string; message?: string }) => void
+      ) => {
+        try {
+          const parsed = callActionSchema.parse(payload);
+          const session = await cancelCall({
+            userId,
+            callId: parsed.callId,
+            reason: parsed.reason,
+          });
+          ack?.({ ok: true, data: session });
+        } catch (err) {
+          ack?.(formatSocketErr(err));
+        }
+      }
+    );
+
+    socket.on(
+      'call:end',
+      async (
+        payload: unknown,
+        ack?: (res: { ok: boolean; data?: unknown; code?: string; message?: string }) => void
+      ) => {
+        try {
+          const parsed = callActionSchema.parse(payload);
+          const session = await endCall({
+            userId,
+            callId: parsed.callId,
+            reason: parsed.reason,
+          });
+          ack?.({ ok: true, data: session });
+        } catch (err) {
+          ack?.(formatSocketErr(err));
+        }
+      }
+    );
+
+    socket.on(
+      'call:state',
+      async (
+        payload: unknown,
+        ack?: (res: { ok: boolean; data?: unknown; code?: string; message?: string }) => void
+      ) => {
+        try {
+          const parsed = callStateReportSchema.parse(payload);
+          const session = await reportClientCallState({
+            userId,
+            callId: parsed.callId,
+            state: parsed.state,
+            reason: parsed.reason,
+          });
+          ack?.({ ok: true, data: session });
+        } catch (err) {
+          ack?.(formatSocketErr(err));
+        }
+      }
+    );
+
     socket.on('disconnect', async () => {
       socketFocusState.delete(socket.id);
       const existing = userSockets.get(userId);
@@ -686,6 +852,7 @@ export function initSocketServer(httpServer: HttpServer): Server {
         existing.delete(socket.id);
         if (existing.size === 0) {
           userSockets.delete(userId);
+          handleUserCallDisconnect(userId);
           const lastSeen = new Date();
           await User.findByIdAndUpdate(userId, {
             onlineStatus: false,
@@ -698,5 +865,6 @@ export function initSocketServer(httpServer: HttpServer): Server {
   });
 
   ioInstance = io;
+  configureCallSignalingRuntime({ io, isUserConnected });
   return io;
 }

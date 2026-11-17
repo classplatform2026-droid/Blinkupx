@@ -86,6 +86,11 @@ export const env = {
       .replace(/^["']|["']$/g, ''),
     fromEnv: resolvedVapid.fromEnv,
   },
+  livekit: {
+    url: (process.env.LIVEKIT_URL || '').trim().replace(/^["']|["']$/g, ''),
+    apiKey: (process.env.LIVEKIT_API_KEY || '').trim().replace(/^["']|["']$/g, ''),
+    apiSecret: (process.env.LIVEKIT_API_SECRET || '').trim().replace(/^["']|["']$/g, ''),
+  },
   otp: {
     provider: detectedOtpProvider,
     resendApiKey: process.env.RESEND_API_KEY || '',
@@ -112,6 +117,15 @@ export function isCloudinaryConfigured(): boolean {
 
 export function isWebPushConfigured(): boolean {
   return Boolean(env.webPush.publicKey && env.webPush.privateKey && env.webPush.subject);
+}
+
+export function isLiveKitConfigured(): boolean {
+  return Boolean(
+    env.livekit.url &&
+      /^wss?:\/\/|^https?:\/\//i.test(env.livekit.url) &&
+      env.livekit.apiKey &&
+      env.livekit.apiSecret
+  );
 }
 
 export function isOtpProviderConfigured(): boolean {
@@ -150,6 +164,7 @@ export function getServiceStatus() {
     database: env.mongodbUri ? 'configured' : 'local-fallback',
     cloudinary: isCloudinaryConfigured(),
     webPush: isWebPushConfigured(),
+    livekit: isLiveKitConfigured(),
     otpProvider: isOtpProviderConfigured(),
     otpProviderType: env.otp.provider,
     missingOtpVars: getMissingOtpVars(),

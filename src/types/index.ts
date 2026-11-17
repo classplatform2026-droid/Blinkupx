@@ -70,6 +70,7 @@ export interface ServiceStatus {
   database: string;
   cloudinary: boolean;
   webPush?: boolean;
+  livekit?: boolean;
   otpProvider: boolean;
   otpProviderType: string;
   missingOtpVars: string[];
@@ -275,12 +276,63 @@ export interface CommunityMembersResponse {
   pendingRequests: User[];
 }
 
+export type CallType = 'voice' | 'video';
+
+export type CallState =
+  | 'idle'
+  | 'initiating'
+  | 'ringing'
+  | 'connecting'
+  | 'connected'
+  | 'reconnecting'
+  | 'ended'
+  | 'rejected'
+  | 'missed'
+  | 'failed';
+
+export interface CallPeerInfo {
+  id: string;
+  fullName: string;
+  username: string;
+  avatar: string;
+}
+
+export interface CallSessionSnapshot {
+  callId: string;
+  roomName: string;
+  conversationId: string | null;
+  callType: CallType;
+  role: 'caller' | 'receiver';
+  state: CallState;
+  peer: CallPeerInfo;
+  startedAt: string;
+  answeredAt: string | null;
+  endedAt: string | null;
+  endReason: string;
+  recipientOnline?: boolean;
+}
+
+export interface CallTokenResponse {
+  url: string;
+  token: string;
+  roomName: string;
+  callId: string;
+  callType: CallType;
+}
+
 export interface CallHistoryItem {
   id: string;
+  callId?: string | null;
+  roomName?: string;
+  conversationId?: string | null;
   callType: 'voice' | 'video';
   direction: 'incoming' | 'outgoing' | 'missed';
-  status: 'completed' | 'missed' | 'declined' | 'cancelled';
+  status: 'completed' | 'missed' | 'declined' | 'rejected' | 'cancelled' | 'failed' | 'busy';
   duration: number;
+  startedAt?: string | null;
+  answeredAt?: string | null;
+  endedAt?: string | null;
+  endReason?: string;
   createdAt: string;
   contact: User | null;
 }

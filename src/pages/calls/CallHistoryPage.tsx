@@ -19,8 +19,9 @@ import { EmptyState, ErrorState, LoadingState } from '../../components/States';
 import { UserAvatar } from '../../components/UserAvatar';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { useAuth } from '../../context/AuthContext';
+import { useCall } from '../../context/CallContext';
 import { useToast } from '../../context/ToastContext';
-import { callApi, conversationApi, extractApiError } from '../../services/api';
+import { callApi, conversationApi, extractApiError, userApi } from '../../services/api';
 import type { CallHistoryItem, User } from '../../types';
 import { formatConversationTime, formatDuration } from '../../utils/formatters';
 import {
@@ -36,6 +37,7 @@ import {
 export function CallHistoryPage() {
   const navigate = useNavigate();
   const { user } = useAuth();
+  const { startCall } = useCall();
   const { showToast } = useToast();
   const qc = useQueryClient();
   const userId = user?.id || '';
@@ -46,7 +48,11 @@ export function CallHistoryPage() {
   const [debouncedQuery, setDebouncedQuery] = useState('');
   const [idbSeed, setIdbSeed] = useState<CallHistoryItem[] | null>(null);
 
-  const [callNoticeModal, setCallNoticeModal] = useState<'voice' | 'video' | 'new' | null>(null);
+  const [newCallModalOpen, setNewCallModalOpen] = useState(false);
+  const [newCallSearch, setNewCallSearch] = useState('');
+  const [initialCallContacts, setInitialCallContacts] = useState<User[]>([]);
+  const [newCallContacts, setNewCallContacts] = useState<User[]>([]);
+  const [loadingContacts, setLoadingContacts] = useState(false);
   const [detailEntry, setDetailEntry] = useState<CallHistoryItem | null>(null);
   const [contactProfile, setContactProfile] = useState<User | null>(null);
 
@@ -122,6 +128,55 @@ export function CallHistoryPage() {
     }
   };
 
+  const openNewCallModal = useCallback(async () => {
+    setNewCallModalOpen(true);
+    setNewCallSearch('');
+    setLoadingContacts(true);
+    try {
+      const convs = await conversationApi.list('all');
+      const peers: User[] = [];
+      const seen = new Set<string>();
+      for (const conv of convs) {
+        if (conv.type !== 'direct') continue;
+        const peerPart = conv.participants.find((p) => p.userId !== userId);
+        if (peerPart?.user && !seen.has(peerPart.user.id)) {
+          seen.add(peerPart.user.id);
+          peers.push(peerPart.user);
+        }
+      }
+      setInitialCallContacts(peers);
+      setNewCallContacts(peers);
+    } catch {
+      // Fall back to search
+    } finally {
+      setLoadingContacts(false);
+    }
+  }, [userId]);
+
+  useEffect(() => {
+    if (!newCallModalOpen) return;
+    const trimmed = newCallSearch.trim();
+    if (!trimmed) {
+      setNewCallContacts(initialCallContacts);
+      return;
+    }
+    let active = true;
+    const timer = setTimeout(async () => {
+      try {
+        const users = await userApi.search(trimmed);
+        if (active) {
+          setNewCallContacts(users.filter((u) => u.id !== userId));
+        }
+      } catch {
+        // Ignore transient search errors
+      }
+    }, 250);
+    return () => {
+      active = false;
+      clearTimeout(timer);
+    };
+  }, [newCallModalOpen, newCallSearch, userId, initialCallContacts]);
+
   return (
     <div className="flex-1 flex flex-col h-full bg-[#181818] overflow-hidden">
       <header className="h-16 px-4 sm:px-6 flex items-center justify-between gap-3 border-b border-[#303030] shrink-0">
@@ -137,7 +192,7 @@ export function CallHistoryPage() {
           </button>
           <PrimaryButton
             variant="secondary"
-            onClick={() => setCallNoticeModal('new')}
+            onClick={() => void openNewCallModal()}
             className="min-h-[38px] px-3.5 py-1.5 text-xs"
           >
             <Plus className="w-4 h-4" />
@@ -190,7 +245,7 @@ export function CallHistoryPage() {
             ))}
           </div>
           <span className="text-xs text-[#999999] hidden sm:inline">
-            Live calling planned post-V1.0
+            1:1 Encrypted Voice & Video
           </span>
         </div>
 
@@ -203,9 +258,9 @@ export function CallHistoryPage() {
             <EmptyState
               icon={<Phone className="w-5 h-5" />}
               title={filter === 'missed' ? 'No missed calls' : 'No call history yet'}
-              description="Live voice and video calling are scheduled for a future release. Any recorded call history will appear here."
-              actionLabel="Go to Chats"
-              onAction={() => navigate('/chats')}
+              description="Start a 1:1 voice or video call from any direct chat or click New Call above."
+              actionLabel="Start New Call"
+              onAction={() => void openNewCallModal()}
             />
           ) : (
             calls.map((entry) => {
@@ -260,22 +315,50 @@ export function CallHistoryPage() {
                   </div>
 
                   <div className="flex items-center gap-1 shrink-0">
-                    <button
-                      type="button"
-                      onClick={() => setCallNoticeModal('voice')}
-                      aria-label="Voice call"
-                      className="min-w-[38px] min-h-[38px] rounded-lg flex items-center justify-center text-[#999999] hover:text-white hover:bg-[#242424] cursor-pointer"
-                    >
-                      <Phone className="w-4 h-4" />
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setCallNoticeModal('video')}
-                      aria-label="Video call"
-                      className="min-w-[38px] min-h-[38px] rounded-lg flex items-center justify-center text-[#999999] hover:text-white hover:bg-[#242424] cursor-pointer"
-                    >
-                      <Video className="w-4 h-4" />
-                    </button>
+                    {entry.contact && (
+                      <>
+                        <button
+                          type="button"
+                          onClick={() =>
+                            void startCall({
+                              recipientId: entry.contact!.id,
+                              callType: 'voice',
+                              conversationId: entry.conversationId,
+                              peerHint: {
+                                id: entry.contact!.id,
+                                fullName: entry.contact!.fullName,
+                                username: entry.contact!.username,
+                                avatar: entry.contact!.avatar,
+                              },
+                            })
+                          }
+                          aria-label={`Voice call ${entry.contact.fullName}`}
+                          className="min-w-[38px] min-h-[38px] rounded-lg flex items-center justify-center text-[#999999] hover:text-white hover:bg-[#242424] cursor-pointer"
+                        >
+                          <Phone className="w-4 h-4" />
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() =>
+                            void startCall({
+                              recipientId: entry.contact!.id,
+                              callType: 'video',
+                              conversationId: entry.conversationId,
+                              peerHint: {
+                                id: entry.contact!.id,
+                                fullName: entry.contact!.fullName,
+                                username: entry.contact!.username,
+                                avatar: entry.contact!.avatar,
+                              },
+                            })
+                          }
+                          aria-label={`Video call ${entry.contact.fullName}`}
+                          className="min-w-[38px] min-h-[38px] rounded-lg flex items-center justify-center text-[#999999] hover:text-white hover:bg-[#242424] cursor-pointer"
+                        >
+                          <Video className="w-4 h-4" />
+                        </button>
+                      </>
+                    )}
                     {entry.contact && (
                       <button
                         type="button"
@@ -310,28 +393,99 @@ export function CallHistoryPage() {
         </div>
       </div>
 
-      {/* Honest V1.0 Calling Notice Modal */}
+      {/* New Call Contact Picker Modal */}
       <Modal
-        open={callNoticeModal !== null}
-        onClose={() => setCallNoticeModal(null)}
-        title="Calling in BlinkUpZ V1.0"
+        open={newCallModalOpen}
+        onClose={() => setNewCallModalOpen(false)}
+        title="Start a Call"
       >
-        <div className="space-y-4">
-          <p className="text-sm text-[#999999] leading-relaxed">
-            Live voice and video calling are not part of BlinkUpZ V1.0. This Call History screen is prepared for future WebRTC integration while you can send real-time voice notes and messages in Chats.
-          </p>
-          <div className="flex justify-end gap-2">
-            <PrimaryButton variant="secondary" onClick={() => setCallNoticeModal(null)}>
-              Close
-            </PrimaryButton>
-            <PrimaryButton
-              onClick={() => {
-                setCallNoticeModal(null);
-                navigate('/chats');
-              }}
-            >
-              Open Chats
-            </PrimaryButton>
+        <div className="space-y-3">
+          <div className="relative">
+            <Search className="w-4 h-4 text-[#999999] absolute left-3 top-1/2 -translate-y-1/2" />
+            <input
+              type="text"
+              autoFocus
+              value={newCallSearch}
+              onChange={(e) => setNewCallSearch(e.target.value)}
+              placeholder="Search people by name or @username..."
+              className="w-full h-10 rounded-xl bg-[#181818] border border-[#303030] pl-9 pr-3 text-sm text-[#FFFFFF] placeholder:text-[#999999] focus:outline-none"
+            />
+          </div>
+
+          <div className="max-h-72 overflow-y-auto space-y-1">
+            {loadingContacts ? (
+              <LoadingState rows={3} />
+            ) : newCallContacts.length === 0 ? (
+              <p className="text-xs text-[#999999] text-center py-6">
+                No contacts found. Search by username or start a chat first.
+              </p>
+            ) : (
+              newCallContacts.map((contact) => (
+                <div
+                  key={contact.id}
+                  className="flex items-center justify-between gap-2 p-2.5 rounded-xl hover:bg-[#181818]"
+                >
+                  <div className="flex items-center gap-2.5 min-w-0">
+                    <UserAvatar
+                      src={contact.avatar}
+                      name={contact.fullName}
+                      size="sm"
+                      online={contact.onlineStatus}
+                    />
+                    <div className="min-w-0">
+                      <p className="text-sm font-medium text-[#FFFFFF] truncate">
+                        {contact.fullName}
+                      </p>
+                      <p className="text-xs text-[#999999] truncate">
+                        @{contact.username}
+                      </p>
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-1 shrink-0">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setNewCallModalOpen(false);
+                        void startCall({
+                          recipientId: contact.id,
+                          callType: 'voice',
+                          peerHint: {
+                            id: contact.id,
+                            fullName: contact.fullName,
+                            username: contact.username,
+                            avatar: contact.avatar,
+                          },
+                        });
+                      }}
+                      aria-label={`Voice call ${contact.fullName}`}
+                      className="w-9 h-9 rounded-lg bg-[#242424] hover:bg-[#303030] text-[#FFFFFF] flex items-center justify-center cursor-pointer"
+                    >
+                      <Phone className="w-4 h-4" />
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setNewCallModalOpen(false);
+                        void startCall({
+                          recipientId: contact.id,
+                          callType: 'video',
+                          peerHint: {
+                            id: contact.id,
+                            fullName: contact.fullName,
+                            username: contact.username,
+                            avatar: contact.avatar,
+                          },
+                        });
+                      }}
+                      aria-label={`Video call ${contact.fullName}`}
+                      className="w-9 h-9 rounded-lg bg-[#242424] hover:bg-[#303030] text-[#FFFFFF] flex items-center justify-center cursor-pointer"
+                    >
+                      <Video className="w-4 h-4" />
+                    </button>
+                  </div>
+                </div>
+              ))
+            )}
           </div>
         </div>
       </Modal>
@@ -384,6 +538,12 @@ export function CallHistoryPage() {
                   {new Date(detailEntry.createdAt).toLocaleString()}
                 </span>
               </div>
+              {detailEntry.endReason && (
+                <div className="flex justify-between gap-4">
+                  <span className="text-[#999999]">Details</span>
+                  <span className="text-right text-[#FFFFFF]">{detailEntry.endReason}</span>
+                </div>
+              )}
             </div>
             <div className="flex justify-end gap-2">
               <PrimaryButton
