@@ -16,6 +16,10 @@ import { getIO } from '../sockets/index.ts';
 import { AppError } from '../utils/errors.ts';
 import { extractAndFetchLinkPreviews } from '../utils/linkPreview.ts';
 import {
+  decodeMessageCursor,
+  encodeMessageCursor,
+} from '../utils/messageCursor.ts';
+import {
   editMessageSchema,
   reactionSchema,
 } from '../validators/schemas.ts';
@@ -23,17 +27,32 @@ import {
 export async function listMessages(req: AuthenticatedRequest, res: Response) {
   const userId = req.userId!;
   const { conversationId } = req.params;
-  const limit = Math.min(Number(req.query.limit || 40), 100);
-  const before = req.query.before ? new Date(String(req.query.before)) : null;
+  const rawLimit = Number(req.query.limit ?? 20);
+  const limit = Number.isFinite(rawLimit)
+    ? Math.min(Math.max(Math.trunc(rawLimit), 1), 50)
+    : 20;
+  const rawCursor = req.query.cursor
+    ? String(req.query.cursor)
+    : req.query.before
+      ? String(req.query.before)
+      : '';
 
   if (!Types.ObjectId.isValid(conversationId)) {
     throw new AppError('Invalid conversation identifier.', 400, 'INVALID_CONVERSATION_ID');
   }
 
+  let decodedCursor: ReturnType<typeof decodeMessageCursor> = null;
+  if (rawCursor.trim()) {
+    decodedCursor = decodeMessageCursor(rawCursor);
+    if (!decodedCursor) {
+      throw new AppError('Invalid pagination cursor.', 400, 'INVALID_CURSOR');
+    }
+  }
+
   const conv = await Conversation.findOne({
     _id: conversationId,
     'participants.userId': new Types.ObjectId(userId),
-  });
+  }).select('_id');
   if (!conv) {
     throw new AppError('Conversation not found or access denied.', 404, 'CONVERSATION_NOT_FOUND');
   }
@@ -42,12 +61,22 @@ export async function listMessages(req: AuthenticatedRequest, res: Response) {
     conversationId: conv._id,
     deletedFor: { $ne: new Types.ObjectId(userId) },
   };
-  if (before && !Number.isNaN(before.getTime())) {
-    query.createdAt = { $lt: before };
+  if (decodedCursor) {
+    if (decodedCursor.id) {
+      query.$or = [
+        { createdAt: { $lt: decodedCursor.createdAt } },
+        {
+          createdAt: decodedCursor.createdAt,
+          _id: { $lt: decodedCursor.id },
+        },
+      ];
+    } else {
+      query.createdAt = { $lt: decodedCursor.createdAt };
+    }
   }
 
   const docs = await Message.find(query)
-    .sort({ createdAt: -1 })
+    .sort({ createdAt: -1, _id: -1 })
     .limit(limit + 1)
     .populate('senderId', PUBLIC_USER_SELECT)
     .populate({
@@ -59,6 +88,12 @@ export async function listMessages(req: AuthenticatedRequest, res: Response) {
   const hasMore = docs.length > limit;
   const pageDocs = hasMore ? docs.slice(0, limit) : docs;
   pageDocs.reverse();
+
+  const oldestDoc = pageDocs.length > 0 ? pageDocs[0] : null;
+  const nextCursor =
+    hasMore && oldestDoc
+      ? encodeMessageCursor(oldestDoc.createdAt, oldestDoc._id.toString())
+      : null;
 
   const senderIds = Array.from(
     new Set(
@@ -77,6 +112,7 @@ export async function listMessages(req: AuthenticatedRequest, res: Response) {
     data: {
       messages: pageDocs.map((m) => serializeMessage(m, viewerContext)),
       hasMore,
+      nextCursor,
     },
   });
 }
@@ -336,18 +372,30 @@ export async function getMessagesAround(req: AuthenticatedRequest, res: Response
   };
 
   const [beforeDocs, afterDocs] = await Promise.all([
-    Message.find({ ...baseFilter, createdAt: { $lte: target.createdAt } })
-      .sort({ createdAt: -1 })
-      .limit(26)
+    Message.find({
+      ...baseFilter,
+      $or: [
+        { createdAt: { $lt: target.createdAt } },
+        { createdAt: target.createdAt, _id: { $lte: target._id } },
+      ],
+    })
+      .sort({ createdAt: -1, _id: -1 })
+      .limit(21)
       .populate('senderId', PUBLIC_USER_SELECT)
       .populate({
         path: 'replyTo',
         select: 'content messageType deletedAt senderId',
         populate: { path: 'senderId', select: 'fullName username' },
       }),
-    Message.find({ ...baseFilter, createdAt: { $gt: target.createdAt } })
-      .sort({ createdAt: 1 })
-      .limit(26)
+    Message.find({
+      ...baseFilter,
+      $or: [
+        { createdAt: { $gt: target.createdAt } },
+        { createdAt: target.createdAt, _id: { $gt: target._id } },
+      ],
+    })
+      .sort({ createdAt: 1, _id: 1 })
+      .limit(21)
       .populate('senderId', PUBLIC_USER_SELECT)
       .populate({
         path: 'replyTo',
@@ -356,14 +404,20 @@ export async function getMessagesAround(req: AuthenticatedRequest, res: Response
       }),
   ]);
 
-  const hasMore = beforeDocs.length > 25;
-  const olderSlice = hasMore ? beforeDocs.slice(0, 25) : beforeDocs;
+  const hasMore = beforeDocs.length > 20;
+  const olderSlice = hasMore ? beforeDocs.slice(0, 20) : beforeDocs;
   olderSlice.reverse();
 
-  const hasNewer = afterDocs.length > 25;
-  const newerSlice = hasNewer ? afterDocs.slice(0, 25) : afterDocs;
+  const hasNewer = afterDocs.length > 20;
+  const newerSlice = hasNewer ? afterDocs.slice(0, 20) : afterDocs;
 
   const combined = [...olderSlice, ...newerSlice];
+  const oldestLoaded = combined.length > 0 ? combined[0] : null;
+  const nextCursor =
+    hasMore && oldestLoaded
+      ? encodeMessageCursor(oldestLoaded.createdAt, oldestLoaded._id.toString())
+      : null;
+
   const senderIds = Array.from(
     new Set(
       combined
@@ -382,6 +436,7 @@ export async function getMessagesAround(req: AuthenticatedRequest, res: Response
       messages: combined.map((m) => serializeMessage(m, viewerContext)),
       hasMore,
       hasNewer,
+      nextCursor,
     },
   });
 }

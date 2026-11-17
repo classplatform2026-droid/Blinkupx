@@ -48,6 +48,7 @@ interface UseOptimisticChatSenderOptions {
   setHasNewerMessages: React.Dispatch<React.SetStateAction<boolean>>;
   setMessages: React.Dispatch<React.SetStateAction<Message[]>>;
   setHasMore: React.Dispatch<React.SetStateAction<boolean>>;
+  setNextCursor?: React.Dispatch<React.SetStateAction<string | null>>;
   onScrollToBottom?: () => void;
 }
 
@@ -61,6 +62,7 @@ export function useOptimisticChatSender({
   setHasNewerMessages,
   setMessages,
   setHasMore,
+  setNextCursor,
   onScrollToBottom,
 }: UseOptimisticChatSenderOptions) {
   const localItemsRef = useRef<Record<string, StagedMediaItem[]>>({});
@@ -356,9 +358,10 @@ export function useOptimisticChatSender({
         syncIncomingMessageCaches(user.id, created);
 
         if (hasNewerMessages) {
-          const latest = await messageApi.list(conversationId);
+          const latest = await messageApi.list(conversationId, { limit: 20 });
           setMessages(latest.messages);
           setHasMore(latest.hasMore);
+          setNextCursor?.(latest.nextCursor);
           setHasNewerMessages(false);
         } else {
           setMessages((prev) => reconcileIncomingMessage(prev, created));
@@ -406,6 +409,7 @@ export function useOptimisticChatSender({
       hasNewerMessages,
       setMessages,
       setHasMore,
+      setNextCursor,
       setHasNewerMessages,
       scheduleCleanupLocalResources,
     ]

@@ -13,10 +13,17 @@ import type { MediaKind } from './mediaConfig';
 const DB_NAME = 'blinkupz_cache_v1';
 const DB_VERSION = 1;
 
-const MAX_MESSAGES_PER_CONVERSATION = 200;
+const MAX_MESSAGES_PER_CONVERSATION = 150;
 const MAX_TOTAL_MESSAGES = 2500;
-const MESSAGE_RETENTION_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
+const MESSAGE_RETENTION_MS = 14 * 24 * 60 * 60 * 1000; // 14 days
 const PROFILE_TTL_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
+
+export interface CachedThreadMeta {
+  hasMore: boolean;
+  nextCursor: string | null;
+  latestMessageId: string | null;
+  fetchedAt: number;
+}
 
 const STATUS_RANK: Record<MessageDeliveryStatus, number> = {
   failed: 0,
@@ -478,8 +485,9 @@ export async function deleteCachedConversation(
   const db = await openCacheDb();
   if (!db) return;
   try {
-    const tx = db.transaction(['conversations', 'messages'], 'readwrite');
+    const tx = db.transaction(['conversations', 'messages', 'preferences'], 'readwrite');
     tx.objectStore('conversations').delete(`${ownerUserId}:${conversationId}`);
+    tx.objectStore('preferences').delete(`thread_meta:${ownerUserId}:${conversationId}`);
     const msgStore = tx.objectStore('messages');
     const index = msgStore.index('byOwnerConvCreated');
     const range = IDBKeyRange.bound(
@@ -493,6 +501,44 @@ export async function deleteCachedConversation(
     await txDone(tx);
   } catch {
     // Ignore deletion errors
+  }
+}
+
+export async function saveCachedThreadMeta(
+  ownerUserId: string,
+  conversationId: string,
+  meta: CachedThreadMeta
+): Promise<void> {
+  if (!ownerUserId || !conversationId) return;
+  await runWithQuotaRetry(async (db) => {
+    const tx = db.transaction('preferences', 'readwrite');
+    tx.objectStore('preferences').put({
+      key: `thread_meta:${ownerUserId}:${conversationId}`,
+      value: meta,
+      updatedAt: Date.now(),
+    });
+    await txDone(tx);
+  });
+}
+
+export async function getCachedThreadMeta(
+  ownerUserId: string,
+  conversationId: string
+): Promise<CachedThreadMeta | null> {
+  if (!ownerUserId || !conversationId) return null;
+  const db = await openCacheDb();
+  if (!db) return null;
+  try {
+    const tx = db.transaction('preferences', 'readonly');
+    const rec = (await requestToPromise(
+      tx.objectStore('preferences').get(`thread_meta:${ownerUserId}:${conversationId}`)
+    )) as StoredPreferenceRecord | undefined;
+    if (!rec?.value || Date.now() - rec.updatedAt > MESSAGE_RETENTION_MS) {
+      return null;
+    }
+    return rec.value as CachedThreadMeta;
+  } catch {
+    return null;
   }
 }
 
@@ -549,12 +595,13 @@ export async function saveCachedMessages(
 export async function getCachedMessages(
   ownerUserId: string,
   conversationId: string,
-  limit = 60
+  limit = 20
 ): Promise<Message[]> {
   if (!ownerUserId || !conversationId) return [];
   const db = await openCacheDb();
   if (!db) return [];
   try {
+    const now = Date.now();
     const tx = db.transaction('messages', 'readonly');
     const index = tx.objectStore('messages').index('byOwnerConvCreated');
     const range = IDBKeyRange.bound(
@@ -563,14 +610,62 @@ export async function getCachedMessages(
     );
     const records = (await requestToPromise(index.getAll(range))) as StoredMessageRecord[];
     const sorted = records
+      .filter((r) => now - (r.cachedAt || now) <= MESSAGE_RETENTION_MS)
       .map((r) => r.data)
-      .sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
+      .sort((a, b) => {
+        const diff = new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime();
+        return diff !== 0 ? diff : a.id.localeCompare(b.id);
+      });
     if (sorted.length > limit) {
       return sorted.slice(sorted.length - limit);
     }
     return sorted;
   } catch {
     return [];
+  }
+}
+
+export async function getOlderCachedMessages(
+  ownerUserId: string,
+  conversationId: string,
+  beforeCreatedAt: string,
+  beforeId: string,
+  limit = 20
+): Promise<{ messages: Message[]; hasMore: boolean }> {
+  if (!ownerUserId || !conversationId || !beforeCreatedAt) {
+    return { messages: [], hasMore: false };
+  }
+  const db = await openCacheDb();
+  if (!db) return { messages: [], hasMore: false };
+  try {
+    const now = Date.now();
+    const cutoffMs = new Date(beforeCreatedAt).getTime();
+    const tx = db.transaction('messages', 'readonly');
+    const index = tx.objectStore('messages').index('byOwnerConvCreated');
+    const range = IDBKeyRange.bound(
+      [ownerUserId, conversationId, ''],
+      [ownerUserId, conversationId, beforeCreatedAt]
+    );
+    const records = (await requestToPromise(index.getAll(range))) as StoredMessageRecord[];
+    const older = records
+      .filter((r) => now - (r.cachedAt || now) <= MESSAGE_RETENTION_MS)
+      .map((r) => r.data)
+      .filter((m) => {
+        const ms = new Date(m.createdAt).getTime();
+        if (ms < cutoffMs) return true;
+        if (ms === cutoffMs) return m.id.localeCompare(beforeId) < 0;
+        return false;
+      })
+      .sort((a, b) => {
+        const diff = new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime();
+        return diff !== 0 ? diff : a.id.localeCompare(b.id);
+      });
+
+    const hasMore = older.length > limit;
+    const slice = hasMore ? older.slice(older.length - limit) : older;
+    return { messages: slice, hasMore };
+  } catch {
+    return { messages: [], hasMore: false };
   }
 }
 
@@ -934,16 +1029,17 @@ export async function pruneOldCacheData(aggressive = false): Promise<void> {
     const maxPerConv = aggressive ? 80 : MAX_MESSAGES_PER_CONVERSATION;
     const maxTotal = aggressive ? 800 : MAX_TOTAL_MESSAGES;
 
-    const tx = db.transaction(['messages', 'profiles'], 'readwrite');
+    const tx = db.transaction(['messages', 'profiles', 'preferences'], 'readwrite');
     const msgStore = tx.objectStore('messages');
     const profileStore = tx.objectStore('profiles');
+    const prefStore = tx.objectStore('preferences');
 
     const allMsgs = (await requestToPromise(msgStore.getAll())) as StoredMessageRecord[];
     const byConv = new Map<string, StoredMessageRecord[]>();
 
     for (const rec of allMsgs) {
       const createdMs = new Date(rec.createdAt).getTime();
-      if (createdMs < msgCutoff) {
+      if (now - (rec.cachedAt || createdMs) > MESSAGE_RETENTION_MS || createdMs < msgCutoff) {
         msgStore.delete(rec.cacheKey);
         continue;
       }
@@ -981,6 +1077,18 @@ export async function pruneOldCacheData(aggressive = false): Promise<void> {
     for (const p of allProfiles) {
       if (p.expiresAt < now) {
         profileStore.delete(p.cacheKey);
+      }
+    }
+
+    const allPrefs = (await requestToPromise(
+      prefStore.getAll()
+    )) as StoredPreferenceRecord[];
+    for (const pref of allPrefs) {
+      if (
+        pref.key.startsWith('thread_meta:') &&
+        now - (pref.updatedAt || 0) > MESSAGE_RETENTION_MS
+      ) {
+        prefStore.delete(pref.key);
       }
     }
 

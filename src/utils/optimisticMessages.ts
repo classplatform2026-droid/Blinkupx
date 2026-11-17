@@ -102,6 +102,46 @@ export function createOptimisticMessage(params: {
   };
 }
 
+export function compareMessageOrder(a: Message, b: Message): number {
+  const timeDiff =
+    new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime();
+  if (timeDiff !== 0) return timeDiff;
+  return a.id.localeCompare(b.id);
+}
+
+function mergeTwoMessages(existing: Message, incoming: Message): Message {
+  const existingRank = STATUS_RANK[existing.deliveryStatus] ?? 1;
+  const incomingRank = STATUS_RANK[incoming.deliveryStatus] ?? 1;
+  const resolvedStatus =
+    existingRank >= 2
+      ? pickHigherStatus(existing.deliveryStatus, incoming.deliveryStatus)
+      : incoming.deliveryStatus;
+
+  const existingEditedMs = existing.editedAt
+    ? new Date(existing.editedAt).getTime()
+    : 0;
+  const incomingEditedMs = incoming.editedAt
+    ? new Date(incoming.editedAt).getTime()
+    : 0;
+
+  const preferExistingContent =
+    Boolean(existing.deletedAt && !incoming.deletedAt) ||
+    (existingEditedMs > incomingEditedMs && incomingRank <= existingRank);
+
+  const primary = preferExistingContent ? existing : incoming;
+
+  return {
+    ...primary,
+    deliveryStatus: resolvedStatus,
+    deliveredTo: mergeUniqueIds(existing.deliveredTo, incoming.deliveredTo),
+    readBy: mergeUniqueIds(existing.readBy, incoming.readBy),
+    mediaProgress:
+      STATUS_RANK[resolvedStatus] >= 2 ? undefined : primary.mediaProgress,
+    localError: STATUS_RANK[resolvedStatus] >= 2 ? null : primary.localError,
+    retryPayload: STATUS_RANK[resolvedStatus] >= 2 ? null : primary.retryPayload,
+  };
+}
+
 export function reconcileIncomingMessage(
   prev: Message[],
   incoming: Message
@@ -115,28 +155,57 @@ export function reconcileIncomingMessage(
   );
 
   if (matchIdx >= 0) {
-    const existing = prev[matchIdx];
-    const resolvedStatus =
-      STATUS_RANK[existing.deliveryStatus] >= 2
-        ? pickHigherStatus(existing.deliveryStatus, incoming.deliveryStatus)
-        : incoming.deliveryStatus;
-
-    const merged: Message = {
-      ...incoming,
-      deliveryStatus: resolvedStatus,
-      deliveredTo: mergeUniqueIds(existing.deliveredTo, incoming.deliveredTo),
-      readBy: mergeUniqueIds(existing.readBy, incoming.readBy),
-      mediaProgress: undefined,
-      localError: null,
-      retryPayload: null,
-    };
-
+    const merged = mergeTwoMessages(prev[matchIdx], incoming);
     const next = [...prev];
     next[matchIdx] = merged;
     return next;
   }
 
   return [...prev, incoming];
+}
+
+export function mergeMessageCollections(
+  base: Message[],
+  additions: Message[]
+): Message[] {
+  if (base.length === 0 && additions.length === 0) return [];
+  const byId = new Map<string, Message>();
+  const clientKeyToId = new Map<string, string>();
+
+  const upsert = (msg: Message) => {
+    const matchedClientKey = msg.clientMessageId
+      ? clientKeyToId.get(msg.clientMessageId)
+      : undefined;
+    const key =
+      (byId.has(msg.id) ? msg.id : undefined) ||
+      matchedClientKey ||
+      (clientKeyToId.has(msg.id) ? clientKeyToId.get(msg.id) : undefined) ||
+      msg.id;
+
+    const existing = byId.get(key);
+    const merged = existing ? mergeTwoMessages(existing, msg) : msg;
+
+    if (key !== merged.id) {
+      byId.delete(key);
+    }
+    byId.set(merged.id, merged);
+    if (merged.clientMessageId) {
+      clientKeyToId.set(merged.clientMessageId, merged.id);
+    }
+  };
+
+  for (const m of base) upsert(m);
+  for (const m of additions) upsert(m);
+
+  return Array.from(byId.values()).sort(compareMessageOrder);
+}
+
+export function prependOlderMessages(
+  current: Message[],
+  olderBatch: Message[]
+): Message[] {
+  if (olderBatch.length === 0) return current;
+  return mergeMessageCollections(olderBatch, current);
 }
 
 export function updateOptimisticMediaProgress(

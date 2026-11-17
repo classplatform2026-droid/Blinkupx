@@ -94,7 +94,9 @@ export const queryKeys = {
 export interface ThreadMessagesCacheData {
   messages: Message[];
   hasMore: boolean;
+  nextCursor: string | null;
   hasNewer?: boolean;
+  fetchedAt: number;
 }
 
 export function syncIncomingMessageCaches(userId: string, msg: Message): void {
@@ -107,6 +109,7 @@ export function syncIncomingMessageCaches(userId: string, msg: Message): void {
       return {
         ...prev,
         messages: reconcileIncomingMessage(prev.messages, msg),
+        fetchedAt: Date.now(),
       };
     }
   );

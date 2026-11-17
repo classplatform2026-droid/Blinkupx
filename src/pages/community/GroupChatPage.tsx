@@ -1,10 +1,12 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
 import {
+  ArrowDown,
   ArrowLeft,
   Bell,
   BellOff,
   Images,
   Info,
+  Loader2,
   LogOut,
   MoreVertical,
   Pin,
@@ -28,6 +30,10 @@ import { useAuth } from '../../context/AuthContext';
 import { useSocket } from '../../context/SocketContext';
 import { useToast } from '../../context/ToastContext';
 import { useOptimisticChatSender } from '../../hooks/useOptimisticChatSender';
+import {
+  MESSAGE_PAGE_SIZE,
+  usePaginatedConversationMessages,
+} from '../../hooks/usePaginatedConversationMessages';
 import { useQueryClient } from '@tanstack/react-query';
 import {
   communityApi,
@@ -45,21 +51,15 @@ import { formatDateSeparator } from '../../utils/formatters';
 import {
   getCachedCommunityDetail,
   getCachedConversationById,
-  getCachedMessages,
-  getPendingOutgoingMessages,
   saveCachedCommunityDetail,
   saveCachedConversation,
-  saveCachedMessages,
 } from '../../utils/indexedDb';
-import { hydratePendingMessagesForUi } from '../../utils/offlineQueue';
-import { reconcileIncomingMessage } from '../../utils/optimisticMessages';
 import {
   CACHE_TIMES,
   queryKeys,
   syncMessageDeleteCaches,
   syncMessageEditCaches,
   syncReactionCaches,
-  type ThreadMessagesCacheData,
 } from '../../utils/queryClient';
 
 export function GroupChatPage() {
@@ -75,8 +75,6 @@ export function GroupChatPage() {
 
   const [community, setCommunity] = useState<CommunityDetail | null>(null);
   const [conversation, setConversation] = useState<Conversation | null>(null);
-  const [messages, setMessages] = useState<Message[]>([]);
-  const [hasMore, setHasMore] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -95,10 +93,35 @@ export function GroupChatPage() {
   const [sharedMediaOpen, setSharedMediaOpen] = useState(false);
   const [jumpedMessageId, setJumpedMessageId] = useState<string | null>(null);
   const [pendingScrollId, setPendingScrollId] = useState<string | null>(null);
-  const [hasNewerMessages, setHasNewerMessages] = useState(false);
 
-  const bottomRef = useRef<HTMLDivElement>(null);
   const convIdForHook = community?.conversationId || '';
+
+  const {
+    messages,
+    setMessages,
+    hasMore,
+    setHasMore,
+    setNextCursor,
+    hasNewerMessages,
+    setHasNewerMessages,
+    loadingOlder,
+    unseenNewCount,
+    scrollContainerRef,
+    contentWrapperRef,
+    bottomRef,
+    scrollToBottom,
+    handleScroll,
+    loadOlder,
+    hydrateCachedThread,
+    applyServerPage,
+    appendRealtimeMessage,
+    markInitialScrollPending,
+  } = usePaginatedConversationMessages({
+    conversationId: convIdForHook,
+    userId,
+    highlightId,
+    onError: (msg) => showToast(msg, 'error'),
+  });
 
   const {
     sendOutgoingMessage,
@@ -113,13 +136,16 @@ export function GroupChatPage() {
     setHasNewerMessages,
     setMessages,
     setHasMore,
-    onScrollToBottom: () => bottomRef.current?.scrollIntoView({ behavior: 'smooth' }),
+    setNextCursor,
+    onScrollToBottom: () => scrollToBottom('smooth'),
   });
 
   const loadGroupChat = useCallback(async () => {
     if (!communityId) return;
     setError(null);
     let hydrated = false;
+    let skipMessagesFetch = false;
+    let hydratedIds = new Set<string>();
 
     if (userId && !highlightId) {
       const memComm = qc.getQueryData<CommunityDetail>(
@@ -133,33 +159,19 @@ export function GroupChatPage() {
           const memConv = qc.getQueryData<Conversation>(
             queryKeys.conversation(userId, cid)
           );
-          const memMsgs = qc.getQueryData<ThreadMessagesCacheData>(
-            queryKeys.messages(userId, cid)
-          );
-          const [idbConv, idbMsgs, pendingRecs] = await Promise.all([
-            memConv ? Promise.resolve(memConv) : getCachedConversationById(userId, cid),
-            memMsgs ? Promise.resolve(null) : getCachedMessages(userId, cid, 60),
-            getPendingOutgoingMessages(userId, cid),
-          ]);
+          const idbConv = memConv || (await getCachedConversationById(userId, cid));
           if (idbConv) {
             setConversation(idbConv);
             hydrated = true;
             setLoading(false);
           }
-          const baseMsgs = memMsgs?.messages || idbMsgs || [];
-          let merged = [...baseMsgs];
-          for (const p of hydratePendingMessagesForUi(pendingRecs)) {
-            merged = reconcileIncomingMessage(merged, p);
-          }
-          if (merged.length > 0) {
-            setMessages(merged);
-            if (memMsgs) {
-              setHasMore(memMsgs.hasMore);
-              setHasNewerMessages(Boolean(memMsgs.hasNewer));
-            }
+          const cacheRes = await hydrateCachedThread(idbConv?.lastMessage?.messageId);
+          if (cacheRes.hydrated) {
             hydrated = true;
+            hydratedIds = cacheRes.hydratedIds;
             setLoading(false);
           }
+          skipMessagesFetch = cacheRes.skipNetworkFetch && Boolean(idbConv);
         } else {
           hydrated = true;
           setLoading(false);
@@ -184,38 +196,34 @@ export function GroupChatPage() {
 
       if (commData.isMember && commData.conversationId) {
         const cid = commData.conversationId;
-        const [convData, msgData, pendingRecs] = await Promise.all([
-          qc.fetchQuery({
-            queryKey: queryKeys.conversation(userId || 'anon', cid),
-            staleTime: CACHE_TIMES.conversationDetail.staleTime,
-            queryFn: () => conversationApi.getById(cid),
-          }),
-          highlightId
-            ? messageApi.getAround(cid, highlightId).catch(() => messageApi.list(cid))
-            : messageApi.list(cid),
-          userId ? getPendingOutgoingMessages(userId, cid) : Promise.resolve([]),
-        ]);
-
-        let mergedMsgs = [...msgData.messages];
-        for (const p of hydratePendingMessagesForUi(pendingRecs)) {
-          mergedMsgs = reconcileIncomingMessage(mergedMsgs, p);
-        }
-
+        const convData = await qc.fetchQuery({
+          queryKey: queryKeys.conversation(userId || 'anon', cid),
+          staleTime: CACHE_TIMES.conversationDetail.staleTime,
+          queryFn: () => conversationApi.getById(cid),
+        });
         setConversation(convData);
-        setMessages(mergedMsgs);
-        setHasMore(msgData.hasMore);
-        setHasNewerMessages(Boolean('hasNewer' in msgData && msgData.hasNewer));
-
         if (userId) {
           void saveCachedConversation(userId, convData);
-          if (!highlightId) {
-            void saveCachedMessages(userId, msgData.messages);
-            qc.setQueryData<ThreadMessagesCacheData>(queryKeys.messages(userId, cid), {
-              messages: mergedMsgs,
-              hasMore: msgData.hasMore,
-              hasNewer: Boolean('hasNewer' in msgData && msgData.hasNewer),
-            });
-          }
+        }
+
+        const isOffline =
+          typeof navigator !== 'undefined' && navigator.onLine === false;
+        const convHasNewerLastMsg = Boolean(
+          !isOffline &&
+            convData.lastMessage?.messageId &&
+            !hydratedIds.has(convData.lastMessage.messageId)
+        );
+        const shouldFetchMessages =
+          !skipMessagesFetch || convHasNewerLastMsg || Boolean(highlightId);
+
+        if (shouldFetchMessages) {
+          const msgData = highlightId
+            ? await messageApi
+                .getAround(cid, highlightId)
+                .catch(() => messageApi.list(cid, { limit: MESSAGE_PAGE_SIZE }))
+            : await messageApi.list(cid, { limit: MESSAGE_PAGE_SIZE });
+
+          await applyServerPage(msgData, { isHighlightView: Boolean(highlightId) });
         }
 
         if (highlightId) {
@@ -235,7 +243,7 @@ export function GroupChatPage() {
     } finally {
       setLoading(false);
     }
-  }, [communityId, highlightId, socket, userId, qc]);
+  }, [communityId, highlightId, socket, userId, qc, hydrateCachedThread, applyServerPage]);
 
   useEffect(() => {
     void loadGroupChat();
@@ -251,12 +259,6 @@ export function GroupChatPage() {
       }
     }
   }, [loading, messages, pendingScrollId]);
-
-  useEffect(() => {
-    if (!loading && !highlightId && !hasNewerMessages) {
-      bottomRef.current?.scrollIntoView({ behavior: 'auto' });
-    }
-  }, [loading, highlightId, hasNewerMessages]);
 
   const convId = community?.conversationId || '';
 
@@ -288,10 +290,7 @@ export function GroupChatPage() {
     const onNewMessage = (msg: Message) => {
       if (msg.conversationId !== convId) return;
       scheduleCleanupLocalResources(msg.clientMessageId, false);
-      if (!hasNewerMessages) {
-        setMessages((prev) => reconcileIncomingMessage(prev, msg));
-        setTimeout(() => bottomRef.current?.scrollIntoView({ behavior: 'smooth' }), 40);
-      }
+      appendRealtimeMessage(msg);
       if (msg.senderId !== user?.id) {
         emitReadIfVisible();
       }
@@ -457,9 +456,10 @@ export function GroupChatPage() {
     loadGroupChat,
     communityId,
     navigate,
-    hasNewerMessages,
     scheduleCleanupLocalResources,
+    appendRealtimeMessage,
     emitReadIfVisible,
+    setMessages,
   ]);
 
   const handleLeaveCommunity = async () => {
@@ -496,6 +496,7 @@ export function GroupChatPage() {
       const around = await messageApi.getAround(convId, messageId);
       setMessages(around.messages);
       setHasMore(around.hasMore);
+      setNextCursor(around.nextCursor ?? null);
       setHasNewerMessages(Boolean(around.hasNewer));
       setPendingScrollId(messageId);
     } catch (err) {
@@ -512,13 +513,12 @@ export function GroupChatPage() {
   const handleBackToLatest = async () => {
     if (!convId) return;
     try {
-      const latest = await messageApi.list(convId);
-      setMessages(latest.messages);
-      setHasMore(latest.hasMore);
-      setHasNewerMessages(false);
-      setTimeout(() => {
-        bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
-      }, 40);
+      markInitialScrollPending();
+      const latest = await messageApi.list(convId, { limit: MESSAGE_PAGE_SIZE });
+      await applyServerPage(latest, { isHighlightView: false });
+      requestAnimationFrame(() => {
+        scrollToBottom('smooth');
+      });
     } catch (err) {
       showToast(extractApiError(err).message, 'error');
     }
@@ -762,149 +762,180 @@ export function GroupChatPage() {
         </div>
       )}
 
-      <div className="flex-1 overflow-y-auto overflow-x-hidden py-4 space-y-1">
-        {hasMore && (
-          <div className="flex justify-center pb-3">
-            <PrimaryButton
-              variant="secondary"
-              onClick={async () => {
-                if (messages.length === 0) return;
-                const data = await messageApi.list(convId, messages[0].createdAt);
-                setMessages((prev) => [...data.messages, ...prev]);
-                setHasMore(data.hasMore);
-                if (userId) {
-                  void saveCachedMessages(userId, data.messages);
-                }
-              }}
-              className="text-xs min-h-[36px] py-1.5 px-3.5"
-            >
-              Load older messages
-            </PrimaryButton>
-          </div>
-        )}
+      <div className="relative flex-1 min-h-0 flex flex-col">
+        <div
+          ref={scrollContainerRef}
+          onScroll={handleScroll}
+          className="flex-1 overflow-y-auto overflow-x-hidden py-4 [overflow-anchor:none]"
+        >
+          <div ref={contentWrapperRef} className="space-y-1">
+            {loadingOlder ? (
+              <div className="flex items-center justify-center gap-2 py-2.5 text-xs text-[#999999]">
+                <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                <span>Loading older messages...</span>
+              </div>
+            ) : hasMore ? (
+              <div className="flex justify-center pb-2">
+                <PrimaryButton
+                  variant="secondary"
+                  onClick={() => void loadOlder()}
+                  className="text-xs min-h-[32px] py-1 px-3"
+                >
+                  Load older messages
+                </PrimaryButton>
+              </div>
+            ) : filteredMessages.length > 0 && !searchQuery.trim() ? (
+              <div className="flex justify-center pb-2.5">
+                <span className="text-[11px] text-[#999999] px-3 py-1 rounded-lg bg-[#202020] border border-[#303030]">
+                  Beginning of conversation
+                </span>
+              </div>
+            ) : null}
 
-        {filteredMessages.map((msg, idx) => {
-          const prev = idx > 0 ? filteredMessages[idx - 1] : null;
-          const showDate =
-            !prev ||
-            new Date(prev.createdAt).toDateString() !==
-              new Date(msg.createdAt).toDateString();
-
-          return (
-            <React.Fragment key={msg.id}>
-              {showDate && (
-                <div className="flex justify-center py-3">
-                  <span className="text-[11px] font-mono text-[#999999] px-3 py-1 rounded-lg bg-[#202020] border border-[#303030]">
-                    {formatDateSeparator(msg.createdAt)}
-                  </span>
-                </div>
-              )}
-              <MessageBubble
-                message={msg}
-                isOwn={msg.senderId === user?.id}
-                isGroup
-                senderRole={roleMap[msg.senderId]}
-                canModerate={canModerate}
-                highlighted={jumpedMessageId === msg.id}
-                compact={user?.settings?.density === 'compact'}
-                onReply={(m) => {
-                  setEditingMessage(null);
-                  setReplyingTo(m);
-                }}
-                onForward={async (m) => {
-                  setForwardingMessage(m);
-                  const convs = await conversationApi.list('all');
-                  setForwardTargets(convs.filter((c) => c.id !== convId));
-                }}
-                onEdit={(m) => {
-                  setReplyingTo(null);
-                  setEditingMessage(m);
-                }}
-                onDelete={async (m, scope) => {
-                  await messageApi.delete(m.id, scope);
-                  const deletedAt = new Date().toISOString();
-                  if (scope === 'me') {
-                    setMessages((prev) => prev.filter((item) => item.id !== m.id));
-                  } else {
-                    setMessages((prev) =>
-                      prev.map((item) =>
-                        item.id === m.id
-                          ? {
-                              ...item,
-                              deletedAt,
-                              content: 'This message was deleted',
-                              attachments: [],
-                              reactions: [],
-                            }
-                          : item
-                      )
-                    );
-                  }
-                  if (userId) {
-                    syncMessageDeleteCaches(userId, {
-                      id: m.id,
-                      conversationId: convId,
-                      deletedAt,
-                      scope,
-                    });
-                  }
-                  window.dispatchEvent(
-                    new CustomEvent('blinkupz:shared-media-refresh', {
-                      detail: { conversationId: convId },
-                    })
-                  );
-                }}
-                onReact={async (m, emoji) => {
-                  const res = await messageApi.toggleReaction(m.id, emoji);
-                  setMessages((prev) =>
-                    prev.map((item) =>
-                      item.id === m.id ? { ...item, reactions: res.reactions } : item
-                    )
-                  );
-                  if (userId) {
-                    syncReactionCaches(userId, {
-                      messageId: m.id,
-                      conversationId: convId,
-                      reactions: res.reactions,
-                    });
-                  }
-                }}
-                onPin={
-                  canPin
-                    ? async (m) => {
-                        const next = await conversationApi.updateMeta(
-                          convId,
-                          'pinMessage',
-                          m.id
-                        );
-                        setConversation(next);
-                        showToast('Message pinned.', 'success');
-                      }
-                    : undefined
-                }
-                onCopy={(text) => {
-                  navigator.clipboard?.writeText(text);
-                  showToast('Copied to clipboard.', 'info');
-                }}
-                onPreviewMedia={(m, idx) => setGalleryPreview({ message: m, index: idx })}
-                onRetry={retryFailedMessage}
-                onDismissFailed={dismissFailedMessage}
+            {filteredMessages.length === 0 ? (
+              <EmptyState
+                title="No messages yet"
+                description="Start the discussion in this community."
               />
-            </React.Fragment>
-          );
-        })}
-        {hasNewerMessages && (
-          <div className="flex justify-center pt-3">
-            <PrimaryButton
-              variant="secondary"
-              onClick={handleBackToLatest}
-              className="text-xs min-h-[36px] py-1.5 px-3.5"
-            >
-              Back to latest messages
-            </PrimaryButton>
+            ) : (
+              filteredMessages.map((msg, idx) => {
+                const prev = idx > 0 ? filteredMessages[idx - 1] : null;
+                const showDate =
+                  !prev ||
+                  new Date(prev.createdAt).toDateString() !==
+                    new Date(msg.createdAt).toDateString();
+
+                return (
+                  <React.Fragment key={msg.id}>
+                    {showDate && (
+                      <div className="flex justify-center py-3">
+                        <span className="text-[11px] font-mono text-[#999999] px-3 py-1 rounded-lg bg-[#202020] border border-[#303030]">
+                          {formatDateSeparator(msg.createdAt)}
+                        </span>
+                      </div>
+                    )}
+                    <MessageBubble
+                      message={msg}
+                      isOwn={msg.senderId === user?.id}
+                      isGroup
+                      senderRole={roleMap[msg.senderId]}
+                      canModerate={canModerate}
+                      highlighted={jumpedMessageId === msg.id}
+                      compact={user?.settings?.density === 'compact'}
+                      onReply={(m) => {
+                        setEditingMessage(null);
+                        setReplyingTo(m);
+                      }}
+                      onForward={async (m) => {
+                        setForwardingMessage(m);
+                        const convs = await conversationApi.list('all');
+                        setForwardTargets(convs.filter((c) => c.id !== convId));
+                      }}
+                      onEdit={(m) => {
+                        setReplyingTo(null);
+                        setEditingMessage(m);
+                      }}
+                      onDelete={async (m, scope) => {
+                        await messageApi.delete(m.id, scope);
+                        const deletedAt = new Date().toISOString();
+                        if (scope === 'me') {
+                          setMessages((prev) => prev.filter((item) => item.id !== m.id));
+                        } else {
+                          setMessages((prev) =>
+                            prev.map((item) =>
+                              item.id === m.id
+                                ? {
+                                    ...item,
+                                    deletedAt,
+                                    content: 'This message was deleted',
+                                    attachments: [],
+                                    reactions: [],
+                                  }
+                                : item
+                            )
+                          );
+                        }
+                        if (userId) {
+                          syncMessageDeleteCaches(userId, {
+                            id: m.id,
+                            conversationId: convId,
+                            deletedAt,
+                            scope,
+                          });
+                        }
+                        window.dispatchEvent(
+                          new CustomEvent('blinkupz:shared-media-refresh', {
+                            detail: { conversationId: convId },
+                          })
+                        );
+                      }}
+                      onReact={async (m, emoji) => {
+                        const res = await messageApi.toggleReaction(m.id, emoji);
+                        setMessages((prev) =>
+                          prev.map((item) =>
+                            item.id === m.id ? { ...item, reactions: res.reactions } : item
+                          )
+                        );
+                        if (userId) {
+                          syncReactionCaches(userId, {
+                            messageId: m.id,
+                            conversationId: convId,
+                            reactions: res.reactions,
+                          });
+                        }
+                      }}
+                      onPin={
+                        canPin
+                          ? async (m) => {
+                              const next = await conversationApi.updateMeta(
+                                convId,
+                                'pinMessage',
+                                m.id
+                              );
+                              setConversation(next);
+                              showToast('Message pinned.', 'success');
+                            }
+                          : undefined
+                      }
+                      onCopy={(text) => {
+                        navigator.clipboard?.writeText(text);
+                        showToast('Copied to clipboard.', 'info');
+                      }}
+                      onPreviewMedia={(m, idx) => setGalleryPreview({ message: m, index: idx })}
+                      onRetry={retryFailedMessage}
+                      onDismissFailed={dismissFailedMessage}
+                    />
+                  </React.Fragment>
+                );
+              })
+            )}
+            {hasNewerMessages && (
+              <div className="flex justify-center pt-3">
+                <PrimaryButton
+                  variant="secondary"
+                  onClick={handleBackToLatest}
+                  className="text-xs min-h-[36px] py-1.5 px-3.5"
+                >
+                  Back to latest messages
+                </PrimaryButton>
+              </div>
+            )}
+            <div ref={bottomRef} />
           </div>
+        </div>
+
+        {unseenNewCount > 0 && (
+          <button
+            type="button"
+            onClick={() => scrollToBottom('smooth')}
+            className="absolute bottom-3 right-4 z-20 inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-[#242424] border border-[#303030] text-xs font-medium text-[#FFFFFF] shadow-lg hover:bg-[#303030] transition-colors cursor-pointer"
+          >
+            <ArrowDown className="w-3.5 h-3.5" />
+            <span>
+              {unseenNewCount} new {unseenNewCount === 1 ? 'message' : 'messages'}
+            </span>
+          </button>
         )}
-        <div ref={bottomRef} />
       </div>
 
       {canSend ? (

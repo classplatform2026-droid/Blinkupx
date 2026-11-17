@@ -1,9 +1,11 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
 import {
+  ArrowDown,
   ArrowLeft,
   Ban,
   BellOff,
   Images,
+  Loader2,
   MoreVertical,
   Phone,
   Pin,
@@ -28,6 +30,10 @@ import { useAuth } from '../../context/AuthContext';
 import { useSocket } from '../../context/SocketContext';
 import { useToast } from '../../context/ToastContext';
 import { useOptimisticChatSender } from '../../hooks/useOptimisticChatSender';
+import {
+  MESSAGE_PAGE_SIZE,
+  usePaginatedConversationMessages,
+} from '../../hooks/usePaginatedConversationMessages';
 import { useQueryClient } from '@tanstack/react-query';
 import {
   conversationApi,
@@ -39,13 +45,8 @@ import type { Conversation, Message, MessageLinkPreview } from '../../types';
 import { formatDateSeparator, formatLastSeen } from '../../utils/formatters';
 import {
   getCachedConversationById,
-  getCachedMessages,
-  getPendingOutgoingMessages,
   saveCachedConversation,
-  saveCachedMessages,
 } from '../../utils/indexedDb';
-import { hydratePendingMessagesForUi } from '../../utils/offlineQueue';
-import { reconcileIncomingMessage } from '../../utils/optimisticMessages';
 import {
   CACHE_TIMES,
   queryKeys,
@@ -53,7 +54,6 @@ import {
   syncMessageDeleteCaches,
   syncMessageEditCaches,
   syncReactionCaches,
-  type ThreadMessagesCacheData,
 } from '../../utils/queryClient';
 
 export function MessageScreen({ conversationId }: { conversationId: string }) {
@@ -68,10 +68,7 @@ export function MessageScreen({ conversationId }: { conversationId: string }) {
   const userId = user?.id || '';
 
   const [conversation, setConversation] = useState<Conversation | null>(null);
-  const [messages, setMessages] = useState<Message[]>([]);
-  const [hasMore, setHasMore] = useState(false);
   const [loading, setLoading] = useState(true);
-  const [loadingOlder, setLoadingOlder] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const [replyingTo, setReplyingTo] = useState<Message | null>(null);
@@ -91,10 +88,33 @@ export function MessageScreen({ conversationId }: { conversationId: string }) {
   const [sharedMediaOpen, setSharedMediaOpen] = useState(false);
   const [jumpedMessageId, setJumpedMessageId] = useState<string | null>(null);
   const [pendingScrollId, setPendingScrollId] = useState<string | null>(null);
-  const [hasNewerMessages, setHasNewerMessages] = useState(false);
 
-  const scrollContainerRef = useRef<HTMLDivElement>(null);
-  const bottomRef = useRef<HTMLDivElement>(null);
+  const {
+    messages,
+    setMessages,
+    hasMore,
+    setHasMore,
+    setNextCursor,
+    hasNewerMessages,
+    setHasNewerMessages,
+    loadingOlder,
+    unseenNewCount,
+    scrollContainerRef,
+    contentWrapperRef,
+    bottomRef,
+    scrollToBottom,
+    handleScroll,
+    loadOlder,
+    hydrateCachedThread,
+    applyServerPage,
+    appendRealtimeMessage,
+    markInitialScrollPending,
+  } = usePaginatedConversationMessages({
+    conversationId,
+    userId,
+    highlightId,
+    onError: (msg) => showToast(msg, 'error'),
+  });
 
   const {
     sendOutgoingMessage,
@@ -109,7 +129,8 @@ export function MessageScreen({ conversationId }: { conversationId: string }) {
     setHasNewerMessages,
     setMessages,
     setHasMore,
-    onScrollToBottom: () => bottomRef.current?.scrollIntoView({ behavior: 'smooth' }),
+    setNextCursor,
+    onScrollToBottom: () => scrollToBottom('smooth'),
   });
 
   const emitReadIfVisible = useCallback(() => {
@@ -123,89 +144,63 @@ export function MessageScreen({ conversationId }: { conversationId: string }) {
   const loadThread = useCallback(async () => {
     setError(null);
     let hydrated = false;
+    let skipMessagesFetch = false;
+    let hydratedIds = new Set<string>();
 
-    // 1. Instant hydration from TanStack Query + IndexedDB + Pending Queue
     if (userId && !highlightId) {
       const memConv = qc.getQueryData<Conversation>(
         queryKeys.conversation(userId, conversationId)
       );
-      const memMsgs = qc.getQueryData<ThreadMessagesCacheData>(
-        queryKeys.messages(userId, conversationId)
-      );
-
-      const [idbConv, idbMsgs, pendingRecs] = await Promise.all([
-        memConv ? Promise.resolve(memConv) : getCachedConversationById(userId, conversationId),
-        memMsgs ? Promise.resolve(null) : getCachedMessages(userId, conversationId, 60),
-        getPendingOutgoingMessages(userId, conversationId),
-      ]);
-
-      const pendingUi = hydratePendingMessagesForUi(pendingRecs);
-
-      if (memConv || idbConv) {
-        setConversation(memConv || idbConv);
+      const cachedConv =
+        memConv || (await getCachedConversationById(userId, conversationId));
+      if (cachedConv) {
+        setConversation(cachedConv);
         hydrated = true;
         setLoading(false);
       }
 
-      const baseMsgs = memMsgs?.messages || idbMsgs || [];
-      if (baseMsgs.length > 0 || pendingUi.length > 0) {
-        let merged = [...baseMsgs];
-        for (const p of pendingUi) {
-          merged = reconcileIncomingMessage(merged, p);
-        }
-        setMessages(merged);
-        if (memMsgs) {
-          setHasMore(memMsgs.hasMore);
-          setHasNewerMessages(Boolean(memMsgs.hasNewer));
-        }
-        hydrated = Boolean(memConv || idbConv || merged.length > 0);
+      const cacheRes = await hydrateCachedThread(cachedConv?.lastMessage?.messageId);
+      if (cacheRes.hydrated) {
+        hydrated = true;
+        hydratedIds = cacheRes.hydratedIds;
         setLoading(false);
       }
+      skipMessagesFetch = cacheRes.skipNetworkFetch && Boolean(cachedConv);
     }
 
     if (!hydrated) {
       setLoading(true);
     }
 
-    // 2. Fetch fresh data from server (respecting staleTime if offline or returning quickly)
     try {
-      const [convData, msgData, pendingRecs] = await Promise.all([
-        qc.fetchQuery({
-          queryKey: queryKeys.conversation(userId || 'anon', conversationId),
-          staleTime: CACHE_TIMES.conversationDetail.staleTime,
-          queryFn: () => conversationApi.getById(conversationId),
-        }),
-        highlightId
-          ? messageApi
-              .getAround(conversationId, highlightId)
-              .catch(() => messageApi.list(conversationId))
-          : messageApi.list(conversationId),
-        userId ? getPendingOutgoingMessages(userId, conversationId) : Promise.resolve([]),
-      ]);
-
-      let mergedMsgs = [...msgData.messages];
-      for (const p of hydratePendingMessagesForUi(pendingRecs)) {
-        mergedMsgs = reconcileIncomingMessage(mergedMsgs, p);
-      }
-
+      const convData = await qc.fetchQuery({
+        queryKey: queryKeys.conversation(userId || 'anon', conversationId),
+        staleTime: CACHE_TIMES.conversationDetail.staleTime,
+        queryFn: () => conversationApi.getById(conversationId),
+      });
       setConversation(convData);
-      setMessages(mergedMsgs);
-      setHasMore(msgData.hasMore);
-      setHasNewerMessages(Boolean('hasNewer' in msgData && msgData.hasNewer));
-
       if (userId) {
         void saveCachedConversation(userId, convData);
-        if (!highlightId) {
-          void saveCachedMessages(userId, msgData.messages);
-          qc.setQueryData<ThreadMessagesCacheData>(
-            queryKeys.messages(userId, conversationId),
-            {
-              messages: mergedMsgs,
-              hasMore: msgData.hasMore,
-              hasNewer: Boolean('hasNewer' in msgData && msgData.hasNewer),
-            }
-          );
-        }
+      }
+
+      const isOffline =
+        typeof navigator !== 'undefined' && navigator.onLine === false;
+      const convHasNewerLastMsg = Boolean(
+        !isOffline &&
+          convData.lastMessage?.messageId &&
+          !hydratedIds.has(convData.lastMessage.messageId)
+      );
+      const shouldFetchMessages =
+        !skipMessagesFetch || convHasNewerLastMsg || Boolean(highlightId);
+
+      if (shouldFetchMessages) {
+        const msgData = highlightId
+          ? await messageApi
+              .getAround(conversationId, highlightId)
+              .catch(() => messageApi.list(conversationId, { limit: MESSAGE_PAGE_SIZE }))
+          : await messageApi.list(conversationId, { limit: MESSAGE_PAGE_SIZE });
+
+        await applyServerPage(msgData, { isHighlightView: Boolean(highlightId) });
       }
 
       if (highlightId) {
@@ -222,7 +217,16 @@ export function MessageScreen({ conversationId }: { conversationId: string }) {
     } finally {
       setLoading(false);
     }
-  }, [conversationId, highlightId, socket, emitReadIfVisible, userId, qc]);
+  }, [
+    conversationId,
+    highlightId,
+    socket,
+    emitReadIfVisible,
+    userId,
+    qc,
+    hydrateCachedThread,
+    applyServerPage,
+  ]);
 
   useEffect(() => {
     void loadThread();
@@ -265,16 +269,9 @@ export function MessageScreen({ conversationId }: { conversationId: string }) {
       if (el) {
         el.scrollIntoView({ behavior: 'smooth', block: 'center' });
         setPendingScrollId(null);
-        return;
       }
     }
   }, [loading, messages, pendingScrollId]);
-
-  useEffect(() => {
-    if (!loading && !highlightId && !hasNewerMessages) {
-      bottomRef.current?.scrollIntoView({ behavior: 'auto' });
-    }
-  }, [loading, highlightId, hasNewerMessages]);
 
   useEffect(() => {
     if (!socket) return;
@@ -282,12 +279,7 @@ export function MessageScreen({ conversationId }: { conversationId: string }) {
     const onNewMessage = (msg: Message) => {
       if (msg.conversationId !== conversationId) return;
       scheduleCleanupLocalResources(msg.clientMessageId, false);
-      if (!hasNewerMessages) {
-        setMessages((prev) => reconcileIncomingMessage(prev, msg));
-        setTimeout(() => {
-          bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
-        }, 40);
-      }
+      appendRealtimeMessage(msg);
       if (msg.senderId !== user?.id) {
         emitReadIfVisible();
       }
@@ -420,41 +412,15 @@ export function MessageScreen({ conversationId }: { conversationId: string }) {
       socket.off('reaction:remove', onReaction);
       socket.off('conversation:updated', onConvUpdated);
     };
-  }, [socket, conversationId, user?.id, hasNewerMessages, scheduleCleanupLocalResources, emitReadIfVisible]);
-
-  const loadOlder = async () => {
-    if (!hasMore || loadingOlder || messages.length === 0) return;
-    setLoadingOlder(true);
-    const container = scrollContainerRef.current;
-    const prevHeight = container?.scrollHeight || 0;
-    try {
-      const oldest = messages[0].createdAt;
-      const data = await messageApi.list(conversationId, oldest);
-      setMessages((prev) => {
-        const merged = [...data.messages, ...prev];
-        if (userId && !hasNewerMessages) {
-          qc.setQueryData<ThreadMessagesCacheData>(
-            queryKeys.messages(userId, conversationId),
-            { messages: merged, hasMore: data.hasMore, hasNewer: false }
-          );
-        }
-        return merged;
-      });
-      setHasMore(data.hasMore);
-      if (userId) {
-        void saveCachedMessages(userId, data.messages);
-      }
-      requestAnimationFrame(() => {
-        if (container) {
-          container.scrollTop = container.scrollHeight - prevHeight;
-        }
-      });
-    } catch (err) {
-      showToast(extractApiError(err).message, 'error');
-    } finally {
-      setLoadingOlder(false);
-    }
-  };
+  }, [
+    socket,
+    conversationId,
+    user?.id,
+    scheduleCleanupLocalResources,
+    appendRealtimeMessage,
+    emitReadIfVisible,
+    setMessages,
+  ]);
 
   const handleSendMessage = (payload: OutgoingMessagePayload) => {
     const replySnapshot = replyingTo;
@@ -589,6 +555,7 @@ export function MessageScreen({ conversationId }: { conversationId: string }) {
       const around = await messageApi.getAround(conversationId, messageId);
       setMessages(around.messages);
       setHasMore(around.hasMore);
+      setNextCursor(around.nextCursor ?? null);
       setHasNewerMessages(Boolean(around.hasNewer));
       setPendingScrollId(messageId);
     } catch (err) {
@@ -598,13 +565,12 @@ export function MessageScreen({ conversationId }: { conversationId: string }) {
 
   const handleBackToLatest = async () => {
     try {
-      const latest = await messageApi.list(conversationId);
-      setMessages(latest.messages);
-      setHasMore(latest.hasMore);
-      setHasNewerMessages(false);
-      setTimeout(() => {
-        bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
-      }, 40);
+      markInitialScrollPending();
+      const latest = await messageApi.list(conversationId, { limit: MESSAGE_PAGE_SIZE });
+      await applyServerPage(latest, { isHighlightView: false });
+      requestAnimationFrame(() => {
+        scrollToBottom('smooth');
+      });
     } catch (err) {
       showToast(extractApiError(err).message, 'error');
     }
@@ -922,103 +888,131 @@ export function MessageScreen({ conversationId }: { conversationId: string }) {
       )}
 
       {/* Message List */}
-      <div
-        ref={scrollContainerRef}
-        className="flex-1 overflow-y-auto overflow-x-hidden py-4 space-y-1"
-      >
-        {hasMore && (
-          <div className="flex justify-center pb-3">
-            <PrimaryButton
-              variant="secondary"
-              loading={loadingOlder}
-              onClick={loadOlder}
-              className="text-xs min-h-[36px] py-1.5 px-3.5"
-            >
-              Load older messages
-            </PrimaryButton>
+      <div className="relative flex-1 min-h-0 flex flex-col">
+        <div
+          ref={scrollContainerRef}
+          onScroll={handleScroll}
+          className="flex-1 overflow-y-auto overflow-x-hidden py-4 [overflow-anchor:none]"
+        >
+          <div ref={contentWrapperRef} className="space-y-1">
+            {loadingOlder ? (
+              <div className="flex items-center justify-center gap-2 py-2.5 text-xs text-[#999999]">
+                <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                <span>Loading older messages...</span>
+              </div>
+            ) : hasMore ? (
+              <div className="flex justify-center pb-2">
+                <PrimaryButton
+                  variant="secondary"
+                  onClick={() => void loadOlder()}
+                  className="text-xs min-h-[32px] py-1 px-3"
+                >
+                  Load older messages
+                </PrimaryButton>
+              </div>
+            ) : filteredMessages.length > 0 && !inChatQuery.trim() ? (
+              <div className="flex justify-center pb-2.5">
+                <span className="text-[11px] text-[#999999] px-3 py-1 rounded-lg bg-[#202020] border border-[#303030]">
+                  Beginning of conversation
+                </span>
+              </div>
+            ) : null}
+
+            {filteredMessages.length === 0 ? (
+              <EmptyState
+                title="No messages yet"
+                description="Send a message, voice note, or file to start the conversation."
+              />
+            ) : (
+              filteredMessages.map((msg, index) => {
+                const prevMsg = index > 0 ? filteredMessages[index - 1] : null;
+                const prevDate = prevMsg
+                  ? new Date(prevMsg.createdAt).toDateString()
+                  : null;
+                const currDate = new Date(msg.createdAt).toDateString();
+                const showDateSeparator = prevDate !== currDate;
+
+                return (
+                  <React.Fragment key={msg.id}>
+                    {showDateSeparator && (
+                      <div className="flex justify-center py-3">
+                        <span className="text-[11px] font-mono text-[#999999] px-3 py-1 rounded-lg bg-[#202020] border border-[#303030]">
+                          {formatDateSeparator(msg.createdAt)}
+                        </span>
+                      </div>
+                    )}
+
+                    <MessageBubble
+                      message={msg}
+                      isOwn={msg.senderId === user?.id}
+                      isGroup={conversation.type !== 'direct'}
+                      senderRole={roleMap[msg.senderId]}
+                      canModerate={canModerate}
+                      highlighted={activeHighlightId === msg.id}
+                      compact={user?.settings?.density === 'compact'}
+                      onReply={(m) => {
+                        setEditingMessage(null);
+                        setReplyingTo(m);
+                      }}
+                      onForward={openForwardModal}
+                      onEdit={(m) => {
+                        setReplyingTo(null);
+                        setEditingMessage(m);
+                      }}
+                      onDelete={handleDeleteMessage}
+                      onReact={handleReaction}
+                      onPin={
+                        canModerate
+                          ? async (m) => {
+                              const next = await conversationApi.updateMeta(
+                                conversation.id,
+                                'pinMessage',
+                                m.id
+                              );
+                              setConversation(next);
+                              showToast('Message pinned.', 'success');
+                            }
+                          : undefined
+                      }
+                      onCopy={(text) => {
+                        navigator.clipboard?.writeText(text);
+                        showToast('Copied to clipboard.', 'info');
+                      }}
+                      onPreviewMedia={(m, idx) => setGalleryPreview({ message: m, index: idx })}
+                      onRetry={retryFailedMessage}
+                      onDismissFailed={dismissFailedMessage}
+                    />
+                  </React.Fragment>
+                );
+              })
+            )}
+            {hasNewerMessages && (
+              <div className="flex justify-center pt-3">
+                <PrimaryButton
+                  variant="secondary"
+                  onClick={handleBackToLatest}
+                  className="text-xs min-h-[36px] py-1.5 px-3.5"
+                >
+                  Back to latest messages
+                </PrimaryButton>
+              </div>
+            )}
+            <div ref={bottomRef} />
           </div>
-        )}
+        </div>
 
-        {filteredMessages.length === 0 ? (
-          <EmptyState
-            title="No messages yet"
-            description="Send a message, voice note, or file to start the conversation."
-          />
-        ) : (
-          filteredMessages.map((msg, index) => {
-            const prevMsg = index > 0 ? filteredMessages[index - 1] : null;
-            const prevDate = prevMsg
-              ? new Date(prevMsg.createdAt).toDateString()
-              : null;
-            const currDate = new Date(msg.createdAt).toDateString();
-            const showDateSeparator = prevDate !== currDate;
-
-            return (
-              <React.Fragment key={msg.id}>
-                {showDateSeparator && (
-                  <div className="flex justify-center py-3">
-                    <span className="text-[11px] font-mono text-[#999999] px-3 py-1 rounded-lg bg-[#202020] border border-[#303030]">
-                      {formatDateSeparator(msg.createdAt)}
-                    </span>
-                  </div>
-                )}
-
-                <MessageBubble
-                  message={msg}
-                  isOwn={msg.senderId === user?.id}
-                  isGroup={conversation.type !== 'direct'}
-                  senderRole={roleMap[msg.senderId]}
-                  canModerate={canModerate}
-                  highlighted={activeHighlightId === msg.id}
-                  compact={user?.settings?.density === 'compact'}
-                  onReply={(m) => {
-                    setEditingMessage(null);
-                    setReplyingTo(m);
-                  }}
-                  onForward={openForwardModal}
-                  onEdit={(m) => {
-                    setReplyingTo(null);
-                    setEditingMessage(m);
-                  }}
-                  onDelete={handleDeleteMessage}
-                  onReact={handleReaction}
-                  onPin={
-                    canModerate
-                      ? async (m) => {
-                          const next = await conversationApi.updateMeta(
-                            conversation.id,
-                            'pinMessage',
-                            m.id
-                          );
-                          setConversation(next);
-                          showToast('Message pinned.', 'success');
-                        }
-                      : undefined
-                  }
-                  onCopy={(text) => {
-                    navigator.clipboard?.writeText(text);
-                    showToast('Copied to clipboard.', 'info');
-                  }}
-                  onPreviewMedia={(m, idx) => setGalleryPreview({ message: m, index: idx })}
-                  onRetry={retryFailedMessage}
-                  onDismissFailed={dismissFailedMessage}
-                />
-              </React.Fragment>
-            );
-          })
+        {unseenNewCount > 0 && (
+          <button
+            type="button"
+            onClick={() => scrollToBottom('smooth')}
+            className="absolute bottom-3 right-4 z-20 inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-[#242424] border border-[#303030] text-xs font-medium text-[#FFFFFF] shadow-lg hover:bg-[#303030] transition-colors cursor-pointer"
+          >
+            <ArrowDown className="w-3.5 h-3.5" />
+            <span>
+              {unseenNewCount} new {unseenNewCount === 1 ? 'message' : 'messages'}
+            </span>
+          </button>
         )}
-        {hasNewerMessages && (
-          <div className="flex justify-center pt-3">
-            <PrimaryButton
-              variant="secondary"
-              onClick={handleBackToLatest}
-              className="text-xs min-h-[36px] py-1.5 px-3.5"
-            >
-              Back to latest messages
-            </PrimaryButton>
-          </div>
-        )}
-        <div ref={bottomRef} />
       </div>
 
       {/* Composer or Blocked Notice */}

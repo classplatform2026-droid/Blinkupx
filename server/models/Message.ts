@@ -157,7 +157,10 @@ const messageSchema = new Schema<IMessage>(
   { timestamps: true }
 );
 
-messageSchema.index({ conversationId: 1, createdAt: -1 });
+messageSchema.index({ conversationId: 1, createdAt: -1, _id: -1 });
+messageSchema.index(
+  { conversationId: 1, deletedFor: 1, createdAt: -1, _id: -1 }
+);
 messageSchema.index(
   { conversationId: 1, senderId: 1, clientMessageId: 1 },
   {

@@ -427,17 +427,39 @@ export const conversationApi = {
 };
 
 export const messageApi = {
-  list: async (conversationId: string, before?: string) => {
+  list: async (
+    conversationId: string,
+    cursorOrOptions?:
+      | string
+      | { cursor?: string | null; before?: string | null; limit?: number }
+  ) => {
+    const opts =
+      typeof cursorOrOptions === 'string'
+        ? { cursor: cursorOrOptions }
+        : cursorOrOptions || {};
+    const limit = opts.limit ?? 20;
+    const params: Record<string, string | number> = { limit };
+    if (opts.cursor) {
+      params.cursor = opts.cursor;
+    } else if (opts.before) {
+      params.before = opts.before;
+    }
+
     const res = await api.get<{
       success: boolean;
-      data: { messages: Message[]; hasMore: boolean };
-    }>(`/messages/${conversationId}`, { params: { before, limit: 40 } });
+      data: { messages: Message[]; hasMore: boolean; nextCursor: string | null };
+    }>(`/messages/${conversationId}`, { params });
     return res.data.data;
   },
   getAround: async (conversationId: string, messageId: string) => {
     const res = await api.get<{
       success: boolean;
-      data: { messages: Message[]; hasMore: boolean; hasNewer?: boolean };
+      data: {
+        messages: Message[];
+        hasMore: boolean;
+        hasNewer?: boolean;
+        nextCursor?: string | null;
+      };
     }>(`/messages/${conversationId}/around/${messageId}`);
     return res.data.data;
   },
