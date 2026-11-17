@@ -24,6 +24,7 @@ import type {
   SharedMediaItem,
 } from '../types';
 import { formatConversationTime, formatFileSize } from '../utils/formatters';
+import { FileNameDisplay } from './FileNameDisplay';
 import { Modal } from './Modal';
 import { PrimaryButton } from './PrimaryButton';
 import { EmptyState, ErrorState, LoadingState } from './States';
@@ -567,9 +568,10 @@ export function SharedMediaPanel({
                       </span>
                     </div>
                     <div className="min-w-0 flex-1">
-                      <p className="text-sm font-medium text-[#FFFFFF] truncate">
-                        {file.fileName}
-                      </p>
+                      <FileNameDisplay
+                        fileName={file.fileName}
+                        className="text-sm font-medium text-[#FFFFFF]"
+                      />
                       <p className="text-xs text-[#999999] font-mono tabular-nums truncate">
                         {formatFileSize(file.fileSize)} · {file.sender?.fullName || 'User'} ·{' '}
                         {formatConversationTime(file.createdAt)}

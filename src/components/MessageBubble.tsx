@@ -10,6 +10,7 @@ import {
   FileText,
   Film,
   Forward,
+  Info,
   Loader2,
   MoreHorizontal,
   Pin,
@@ -22,7 +23,18 @@ import { useToast } from '../context/ToastContext';
 import type { MediaUploadProgressItem, Message, MessageAttachment } from '../types';
 import { extractApiError, mediaApi } from '../services/api';
 import { formatDuration, formatFileSize, formatTime } from '../utils/formatters';
+import {
+  computeDampedSwipeOffset,
+  detectSwipeLockDirection,
+  isInteractiveMediaTarget,
+  shouldTriggerSwipeReply,
+  SWIPE_TRIGGER_THRESHOLD_PX,
+  type GestureLock,
+} from '../utils/swipeGesture';
 import { EmojiPicker } from './EmojiPicker';
+import { FileNameDisplay } from './FileNameDisplay';
+import { Modal } from './Modal';
+import { PrimaryButton } from './PrimaryButton';
 import { UserAvatar } from './UserAvatar';
 
 function renderMessageText(text: string, isOwn: boolean) {
@@ -162,8 +174,21 @@ export function MessageBubble({
   const [menuOpen, setMenuOpen] = useState(false);
   const [reactOpen, setReactOpen] = useState(false);
   const [swipeOffset, setSwipeOffset] = useState(0);
+  const [isSwiping, setIsSwiping] = useState(false);
+  const [fileDetailModal, setFileDetailModal] = useState<{
+    att: MessageAttachment;
+    index: number;
+  } | null>(null);
   const [fallbackUrls, setFallbackUrls] = useState<Record<number, string>>({});
-  const pointerStartX = useRef<number | null>(null);
+
+  const pointerStartRef = useRef<{ x: number; y: number; pointerId: number } | null>(
+    null
+  );
+  const gestureLockRef = useRef<GestureLock>('none');
+  const swipeOffsetRef = useRef(0);
+  const crossedThresholdRef = useRef(false);
+  const hasTriggeredRef = useRef(false);
+  const suppressClickRef = useRef(false);
   const longPressTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const tryAuthenticatedMediaFallback = async (idx: number) => {
@@ -194,39 +219,151 @@ export function MessageBubble({
   const isSending = message.deliveryStatus === 'sending';
   const isFailed = message.deliveryStatus === 'failed';
   const isPendingOrFailed = isSending || isFailed;
+  const canSwipeToReply = !isDeleted && !isPendingOrFailed;
 
-  const handlePointerDown = (e: React.PointerEvent) => {
-    if (isPendingOrFailed) return;
-    pointerStartX.current = e.clientX;
-    if (e.pointerType === 'touch') {
-      longPressTimer.current = setTimeout(() => {
-        setMenuOpen(true);
-      }, 500);
-    }
-  };
-
-  const handlePointerMove = (e: React.PointerEvent) => {
-    if (pointerStartX.current === null || isPendingOrFailed) return;
-    const dx = e.clientX - pointerStartX.current;
-    if (Math.abs(dx) > 8 && longPressTimer.current) {
-      clearTimeout(longPressTimer.current);
-      longPressTimer.current = null;
-    }
-    if (dx > 0 && dx < 72) {
-      setSwipeOffset(dx);
-    }
-  };
-
-  const handlePointerUp = () => {
+  const clearLongPress = () => {
     if (longPressTimer.current) {
       clearTimeout(longPressTimer.current);
       longPressTimer.current = null;
     }
-    if (swipeOffset > 44 && !isDeleted && !isPendingOrFailed) {
-      onReply(message);
-    }
-    pointerStartX.current = null;
+  };
+
+  const resetSwipeState = () => {
+    pointerStartRef.current = null;
+    gestureLockRef.current = 'none';
+    swipeOffsetRef.current = 0;
+    crossedThresholdRef.current = false;
+    setIsSwiping(false);
     setSwipeOffset(0);
+  };
+
+  const handlePointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (isPendingOrFailed) return;
+    if (e.pointerType === 'mouse' && e.button !== 0) return;
+
+    if (e.pointerType === 'touch') {
+      clearLongPress();
+      longPressTimer.current = setTimeout(() => {
+        setMenuOpen(true);
+      }, 500);
+    }
+
+    if (!canSwipeToReply || isInteractiveMediaTarget(e.target)) {
+      return;
+    }
+
+    pointerStartRef.current = {
+      x: e.clientX,
+      y: e.clientY,
+      pointerId: e.pointerId,
+    };
+    gestureLockRef.current = 'none';
+    swipeOffsetRef.current = 0;
+    crossedThresholdRef.current = false;
+    hasTriggeredRef.current = false;
+    suppressClickRef.current = false;
+  };
+
+  const handlePointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
+    const start = pointerStartRef.current;
+    if (!start || start.pointerId !== e.pointerId || !canSwipeToReply) return;
+
+    const dx = e.clientX - start.x;
+    const dy = e.clientY - start.y;
+
+    if (Math.abs(dx) > 8 || Math.abs(dy) > 8) {
+      clearLongPress();
+    }
+
+    const selection = typeof window !== 'undefined' ? window.getSelection() : null;
+    if (selection && !selection.isCollapsed && selection.toString().trim().length > 0) {
+      resetSwipeState();
+      return;
+    }
+
+    if (gestureLockRef.current === 'vertical') return;
+
+    if (gestureLockRef.current === 'none') {
+      const detected = detectSwipeLockDirection(dx, dy);
+      if (detected === 'vertical') {
+        gestureLockRef.current = 'vertical';
+        pointerStartRef.current = null;
+        return;
+      }
+      if (detected === 'horizontal') {
+        gestureLockRef.current = 'horizontal';
+        setIsSwiping(true);
+        suppressClickRef.current = true;
+        try {
+          e.currentTarget.setPointerCapture(e.pointerId);
+        } catch {
+          // Safe fallback for environments without active pointer capture
+        }
+      } else {
+        return;
+      }
+    }
+
+    const nextOffset = computeDampedSwipeOffset(dx);
+    swipeOffsetRef.current = nextOffset;
+    setSwipeOffset(nextOffset);
+
+    const crossed = Math.abs(nextOffset) >= SWIPE_TRIGGER_THRESHOLD_PX;
+    if (crossed && !crossedThresholdRef.current) {
+      crossedThresholdRef.current = true;
+      if (typeof navigator !== 'undefined' && typeof navigator.vibrate === 'function') {
+        try {
+          navigator.vibrate(10);
+        } catch {
+          // Ignore unsupported vibration calls
+        }
+      }
+    } else if (!crossed) {
+      crossedThresholdRef.current = false;
+    }
+  };
+
+  const finishSwipe = (
+    e: React.PointerEvent<HTMLDivElement>,
+    cancelled: boolean
+  ) => {
+    clearLongPress();
+    const wasHorizontal = gestureLockRef.current === 'horizontal';
+    const finalOffset = swipeOffsetRef.current;
+
+    if (wasHorizontal) {
+      try {
+        if (e.currentTarget.hasPointerCapture(e.pointerId)) {
+          e.currentTarget.releasePointerCapture(e.pointerId);
+        }
+      } catch {
+        // Ignore pointer capture release errors
+      }
+
+      if (
+        !hasTriggeredRef.current &&
+        canSwipeToReply &&
+        shouldTriggerSwipeReply(finalOffset, cancelled)
+      ) {
+        hasTriggeredRef.current = true;
+        onReply(message);
+      }
+
+      suppressClickRef.current = true;
+      setTimeout(() => {
+        suppressClickRef.current = false;
+      }, 60);
+    }
+
+    resetSwipeState();
+  };
+
+  const handlePointerUp = (e: React.PointerEvent<HTMLDivElement>) => {
+    finishSwipe(e, false);
+  };
+
+  const handlePointerCancel = (e: React.PointerEvent<HTMLDivElement>) => {
+    finishSwipe(e, true);
   };
 
   const roleLabel =
@@ -353,10 +490,17 @@ export function MessageBubble({
     );
   };
 
+  const swipeProgress = Math.min(
+    1,
+    Math.abs(swipeOffset) / SWIPE_TRIGGER_THRESHOLD_PX
+  );
+  const swipeThresholdReached =
+    Math.abs(swipeOffset) >= SWIPE_TRIGGER_THRESHOLD_PX;
+
   return (
     <div
       id={`msg-${message.id}`}
-      className={`group flex gap-2.5 px-3 sm:px-5 ${
+      className={`group flex gap-2.5 px-3 sm:px-5 w-full min-w-0 max-w-full overflow-x-hidden ${
         compact ? 'py-0.5' : 'py-1.5'
       } ${isOwn ? 'justify-end' : 'justify-start'} ${
         highlighted ? 'bg-[#242424]/70 rounded-xl transition-colors duration-500' : ''
@@ -373,17 +517,20 @@ export function MessageBubble({
       )}
 
       <div
-        className={`relative max-w-[82%] sm:max-w-[68%] flex flex-col ${
+        className={`relative min-w-0 max-w-[82%] sm:max-w-[68%] flex flex-col touch-pan-y ${
           isOwn ? 'items-end' : 'items-start'
         }`}
-        style={{
-          transform: swipeOffset ? `translateX(${swipeOffset}px)` : undefined,
-          transition: swipeOffset ? 'none' : 'transform 150ms ease',
-        }}
         onPointerDown={handlePointerDown}
         onPointerMove={handlePointerMove}
         onPointerUp={handlePointerUp}
-        onPointerCancel={handlePointerUp}
+        onPointerCancel={handlePointerCancel}
+        onClickCapture={(e) => {
+          if (suppressClickRef.current) {
+            e.preventDefault();
+            e.stopPropagation();
+            suppressClickRef.current = false;
+          }
+        }}
         onContextMenu={(e) => {
           if (isPendingOrFailed) return;
           e.preventDefault();
@@ -392,16 +539,16 @@ export function MessageBubble({
         }}
       >
         {!isOwn && isGroup && message.sender && (
-          <div className="flex items-center gap-2 mb-1 px-1">
-            <span className="text-xs font-medium text-[#FFFFFF]">
+          <div className="flex items-center gap-2 mb-1 px-1 max-w-full min-w-0">
+            <span className="text-xs font-medium text-[#FFFFFF] truncate">
               {message.sender.fullName}
             </span>
             {roleLabel && (
               <>
-                <span className="text-[#999999] text-xs" aria-hidden="true">
+                <span className="text-[#999999] text-xs shrink-0" aria-hidden="true">
                   ·
                 </span>
-                <span className="text-[11px] font-medium text-[#999999]">
+                <span className="text-[11px] font-medium text-[#999999] shrink-0">
                   {roleLabel}
                 </span>
               </>
@@ -409,120 +556,152 @@ export function MessageBubble({
           </div>
         )}
 
-        <div className="flex items-end gap-1.5">
-          {isOwn && !isDeleted && !isPendingOrFailed && (
-            <div className="opacity-0 group-hover:opacity-100 focus-within:opacity-100 transition-opacity flex items-center gap-0.5 pb-1">
-              <button
-                type="button"
-                onClick={() => {
-                  setReactOpen((prev) => !prev);
-                  setMenuOpen(false);
-                }}
-                aria-label="React to message"
-                className="w-7 h-7 rounded-lg flex items-center justify-center text-[#999999] hover:text-white hover:bg-[#242424] cursor-pointer"
-              >
-                <SmilePlus className="w-4 h-4" />
-              </button>
-              <button
-                type="button"
-                onClick={() => {
-                  setMenuOpen((prev) => !prev);
-                  setReactOpen(false);
-                }}
-                aria-label="Message actions"
-                className="w-7 h-7 rounded-lg flex items-center justify-center text-[#999999] hover:text-white hover:bg-[#242424] cursor-pointer"
-              >
-                <MoreHorizontal className="w-4 h-4" />
-              </button>
+        <div className="relative min-w-0 max-w-full">
+          {swipeOffset !== 0 && (
+            <div
+              aria-hidden="true"
+              className={`pointer-events-none absolute top-1/2 z-0 flex items-center justify-center w-8 h-8 rounded-full border transition-colors duration-150 ${
+                swipeOffset > 0 ? 'left-1' : 'right-1'
+              } ${
+                swipeThresholdReached
+                  ? 'bg-[#FFFFFF] text-[#181818] border-[#FFFFFF] shadow-md'
+                  : 'bg-[#242424] text-[#FFFFFF] border-[#303030]'
+              }`}
+              style={{
+                opacity: Math.max(0.2, swipeProgress),
+                transform: `translateY(-50%) scale(${0.75 + swipeProgress * 0.3})`,
+              }}
+            >
+              <Reply className="w-4 h-4" />
             </div>
           )}
 
           <div
-            className={`rounded-2xl px-3.5 py-2.5 text-sm leading-relaxed break-words transition-opacity ${
-              isDeleted
-                ? 'bg-[#202020] border border-[#303030] text-[#999999] italic'
-                : isOwn
-                  ? isFailed
-                    ? 'bg-[#FFFFFF] text-[#181818] ring-1 ring-[#E5484D]'
-                    : isSending
-                      ? 'bg-[#FFFFFF]/95 text-[#181818]'
-                      : 'bg-[#FFFFFF] text-[#181818]'
-                  : 'bg-[#242424] text-[#FFFFFF] border border-[#303030]'
+            className={`relative z-10 flex items-end gap-1.5 min-w-0 max-w-full ${
+              isSwiping ? 'select-none' : ''
             }`}
+            style={{
+              transform: swipeOffset ? `translate3d(${swipeOffset}px, 0, 0)` : undefined,
+              transition: isSwiping
+                ? 'none'
+                : 'transform 180ms cubic-bezier(0.22, 1, 0.36, 1)',
+            }}
           >
-            {!isDeleted && message.forwardedFrom && (
-              <div
-                className={`flex items-center gap-1.5 text-[11px] mb-1 ${
-                  isOwn ? 'text-[#555555]' : 'text-[#999999]'
-                }`}
-              >
-                <Forward className="w-3 h-3" />
-                <span>Forwarded from {message.forwardedFrom.senderName}</span>
+            {isOwn && !isDeleted && !isPendingOrFailed && (
+              <div className="opacity-0 group-hover:opacity-100 focus-within:opacity-100 transition-opacity flex items-center gap-0.5 pb-1 shrink-0">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setReactOpen((prev) => !prev);
+                    setMenuOpen(false);
+                  }}
+                  aria-label="React to message"
+                  className="w-7 h-7 rounded-lg flex items-center justify-center text-[#999999] hover:text-white hover:bg-[#242424] cursor-pointer"
+                >
+                  <SmilePlus className="w-4 h-4" />
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setMenuOpen((prev) => !prev);
+                    setReactOpen(false);
+                  }}
+                  aria-label="Message actions"
+                  className="w-7 h-7 rounded-lg flex items-center justify-center text-[#999999] hover:text-white hover:bg-[#242424] cursor-pointer"
+                >
+                  <MoreHorizontal className="w-4 h-4" />
+                </button>
               </div>
             )}
 
-            {!isDeleted && message.replyTo && (
-              <div
-                className={`mb-2 rounded-lg px-2.5 py-1.5 text-xs ${
-                  isOwn
-                    ? 'bg-[#181818]/10 text-[#181818]'
-                    : 'bg-[#181818] text-[#999999] border border-[#303030]'
-                }`}
-              >
-                <p className="font-semibold truncate">{message.replyTo.senderName}</p>
-                <p className="truncate opacity-80">
-                  {message.replyTo.content || message.replyTo.messageType}
-                </p>
-              </div>
-            )}
+            <div
+              className={`min-w-0 max-w-full overflow-hidden rounded-2xl px-3.5 py-2.5 text-sm leading-relaxed break-words [overflow-wrap:anywhere] transition-opacity ${
+                isDeleted
+                  ? 'bg-[#202020] border border-[#303030] text-[#999999] italic'
+                  : isOwn
+                    ? isFailed
+                      ? 'bg-[#FFFFFF] text-[#181818] ring-1 ring-[#E5484D]'
+                      : isSending
+                        ? 'bg-[#FFFFFF]/95 text-[#181818]'
+                        : 'bg-[#FFFFFF] text-[#181818]'
+                    : 'bg-[#242424] text-[#FFFFFF] border border-[#303030]'
+              }`}
+            >
+              {!isDeleted && message.forwardedFrom && (
+                <div
+                  className={`flex items-center gap-1.5 text-[11px] mb-1 min-w-0 ${
+                    isOwn ? 'text-[#555555]' : 'text-[#999999]'
+                  }`}
+                >
+                  <Forward className="w-3 h-3 shrink-0" />
+                  <span className="truncate">
+                    Forwarded from {message.forwardedFrom.senderName}
+                  </span>
+                </div>
+              )}
 
-            {/* Visual Media Grid (1 item full, 2 items 2-col, 3 items 1+2, 4+ items 2x2 with +N) */}
-            {visualMedia.length === 1 && (
-              <div className="mb-1.5 space-y-1">
-                {renderVisualTile(visualMedia[0].att, visualMedia[0].index)}
-                {visualMedia[0].att.caption && (
-                  <p className="text-xs whitespace-pre-wrap opacity-90">
-                    {visualMedia[0].att.caption}
+              {!isDeleted && message.replyTo && (
+                <div
+                  className={`mb-2 min-w-0 max-w-full overflow-hidden rounded-lg px-2.5 py-1.5 text-xs ${
+                    isOwn
+                      ? 'bg-[#181818]/10 text-[#181818]'
+                      : 'bg-[#181818] text-[#999999] border border-[#303030]'
+                  }`}
+                >
+                  <p className="font-semibold truncate">{message.replyTo.senderName}</p>
+                  <p className="truncate opacity-80">
+                    {message.replyTo.content || message.replyTo.messageType}
                   </p>
-                )}
-              </div>
-            )}
+                </div>
+              )}
 
-            {visualMedia.length === 2 && (
-              <div className="grid grid-cols-2 gap-1 mb-1.5 min-w-[210px] sm:min-w-[260px]">
-                {visualMedia.map(({ att, index }) =>
-                  renderVisualTile(att, index, 'aspect-square')
-                )}
-              </div>
-            )}
+              {/* Visual Media Grid (1 item full, 2 items 2-col, 3 items 1+2, 4+ items 2x2 with +N) */}
+              {visualMedia.length === 1 && (
+                <div className="mb-1.5 space-y-1 min-w-0 max-w-full">
+                  {renderVisualTile(visualMedia[0].att, visualMedia[0].index)}
+                  {visualMedia[0].att.caption && (
+                    <p className="text-xs whitespace-pre-wrap break-words [overflow-wrap:anywhere] opacity-90">
+                      {visualMedia[0].att.caption}
+                    </p>
+                  )}
+                </div>
+              )}
 
-            {visualMedia.length === 3 && (
-              <div className="grid grid-cols-2 gap-1 mb-1.5 min-w-[210px] sm:min-w-[260px]">
-                {renderVisualTile(
-                  visualMedia[0].att,
-                  visualMedia[0].index,
-                  'col-span-2 aspect-[16/10]'
-                )}
-                {visualMedia.slice(1).map(({ att, index }) =>
-                  renderVisualTile(att, index, 'aspect-square')
-                )}
-              </div>
-            )}
+              {visualMedia.length === 2 && (
+                <div className="grid grid-cols-2 gap-1 mb-1.5 w-[min(240px,100%)] sm:w-[260px] max-w-full">
+                  {visualMedia.map(({ att, index }) =>
+                    renderVisualTile(att, index, 'aspect-square')
+                  )}
+                </div>
+              )}
 
-            {visualMedia.length >= 4 && (
-              <div className="grid grid-cols-2 gap-1 mb-1.5 min-w-[210px] sm:min-w-[260px]">
-                {visualMedia.slice(0, 4).map(({ att, index }, tileIdx) =>
-                  renderVisualTile(
-                    att,
-                    index,
-                    'aspect-square',
-                    tileIdx === 3 && visualMedia.length > 4
-                      ? visualMedia.length - 4
-                      : 0
-                  )
-                )}
-              </div>
-            )}
+              {visualMedia.length === 3 && (
+                <div className="grid grid-cols-2 gap-1 mb-1.5 w-[min(240px,100%)] sm:w-[260px] max-w-full">
+                  {renderVisualTile(
+                    visualMedia[0].att,
+                    visualMedia[0].index,
+                    'col-span-2 aspect-[16/10]'
+                  )}
+                  {visualMedia.slice(1).map(({ att, index }) =>
+                    renderVisualTile(att, index, 'aspect-square')
+                  )}
+                </div>
+              )}
+
+              {visualMedia.length >= 4 && (
+                <div className="grid grid-cols-2 gap-1 mb-1.5 w-[min(240px,100%)] sm:w-[260px] max-w-full">
+                  {visualMedia.slice(0, 4).map(({ att, index }, tileIdx) =>
+                    renderVisualTile(
+                      att,
+                      index,
+                      'aspect-square',
+                      tileIdx === 3 && visualMedia.length > 4
+                        ? visualMedia.length - 4
+                        : 0
+                    )
+                  )}
+                </div>
+              )}
 
             {/* Show individual captions summary under multi-media grid if any item has an individual caption */}
             {visualMedia.length > 1 &&
@@ -557,7 +736,7 @@ export function MessageBubble({
                 return (
                   <div
                     key={`${att.url}-${index}`}
-                    className="flex flex-col gap-1 min-w-[210px] py-1"
+                    className="flex flex-col gap-1 w-[min(240px,100%)] max-w-full py-1"
                   >
                     <audio
                       src={resolvedUrl}
@@ -593,46 +772,80 @@ export function MessageBubble({
               }
 
               return (
-                <div key={`${att.url}-${index}`} className="mb-1.5">
-                  <button
-                    type="button"
-                    onClick={() => {
-                      if (isPendingOrFailed || att.url.startsWith('blob:')) return;
-                      mediaApi
-                        .downloadAttachment(message.id, index, att.fileName || 'attachment')
-                        .catch((err) => showToast(extractApiError(err).message, 'error'));
-                    }}
-                    className={`w-full text-left flex items-center gap-3 p-2.5 rounded-xl cursor-pointer transition-colors ${
-                      isOwn
-                        ? 'bg-[#181818]/10 text-[#181818] hover:bg-[#181818]/15'
-                        : 'bg-[#181818] text-[#FFFFFF] border border-[#303030] hover:bg-[#202020]'
-                    }`}
-                  >
-                    <FileText className="w-5 h-5 shrink-0" />
-                    <div className="min-w-0 flex-1">
-                      <p className="text-xs font-medium truncate">{att.fileName}</p>
-                      <p className="text-[11px] opacity-70 font-mono tabular-nums">
-                        {progressItem && progressItem.stage !== 'sent'
-                          ? progressItem.stage === 'uploading'
-                            ? `Uploading · ${progressItem.progress}%`
-                            : progressItem.stage === 'processing'
-                              ? 'Processing...'
-                              : progressItem.stage === 'failed'
-                                ? 'Failed'
-                                : 'Preparing...'
-                          : formatFileSize(att.fileSize)}
-                      </p>
+                <div key={`${att.url}-${index}`} className="mb-1.5 w-full min-w-0 max-w-full">
+                  <div className="w-full min-w-0 max-w-full flex items-center gap-2.5 p-2.5 rounded-xl bg-[#242424] border border-[#303030] text-[#FFFFFF] hover:bg-[#2A2A2A] transition-colors overflow-hidden">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (isPendingOrFailed || att.url.startsWith('blob:')) return;
+                        mediaApi
+                          .downloadAttachment(message.id, index, att.fileName || 'attachment')
+                          .catch((err) => showToast(extractApiError(err).message, 'error'));
+                      }}
+                      title={`${att.fileName || 'Attachment'} (${formatFileSize(att.fileSize)})`}
+                      className="flex-1 min-w-0 flex items-center gap-2.5 text-left cursor-pointer"
+                    >
+                      <div className="w-9 h-9 rounded-lg bg-[#181818] border border-[#303030] flex items-center justify-center shrink-0">
+                        <FileText className="w-4 h-4 text-[#FFFFFF]" />
+                      </div>
+                      <div className="min-w-0 flex-1">
+                        <FileNameDisplay
+                          fileName={att.fileName}
+                          className="text-xs font-medium text-[#FFFFFF]"
+                        />
+                        <p className="text-[11px] text-[#999999] font-mono tabular-nums truncate">
+                          {progressItem && progressItem.stage !== 'sent'
+                            ? progressItem.stage === 'uploading'
+                              ? `Uploading · ${progressItem.progress}%`
+                              : progressItem.stage === 'processing'
+                                ? 'Processing...'
+                                : progressItem.stage === 'failed'
+                                  ? 'Failed'
+                                  : 'Preparing...'
+                            : formatFileSize(att.fileSize)}
+                        </p>
+                      </div>
+                    </button>
+
+                    <div className="flex items-center gap-1 shrink-0" data-no-swipe="true">
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setFileDetailModal({ att, index });
+                        }}
+                        aria-label={`View full file details for ${att.fileName || 'attachment'}`}
+                        title="View full filename & details"
+                        className="w-7 h-7 rounded-lg flex items-center justify-center text-[#999999] hover:text-[#FFFFFF] hover:bg-[#303030] transition-colors cursor-pointer"
+                      >
+                        <Info className="w-3.5 h-3.5" />
+                      </button>
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          if (isPendingOrFailed || att.url.startsWith('blob:')) return;
+                          mediaApi
+                            .downloadAttachment(message.id, index, att.fileName || 'attachment')
+                            .catch((err) => showToast(extractApiError(err).message, 'error'));
+                        }}
+                        disabled={isPendingOrFailed}
+                        aria-label={`Download ${att.fileName || 'attachment'}`}
+                        title="Download file"
+                        className="w-7 h-7 rounded-lg flex items-center justify-center text-[#999999] hover:text-[#FFFFFF] hover:bg-[#303030] transition-colors cursor-pointer disabled:opacity-50"
+                      >
+                        {progressItem &&
+                        progressItem.stage !== 'sent' &&
+                        progressItem.stage !== 'failed' ? (
+                          <Loader2 className="w-4 h-4 animate-spin" />
+                        ) : (
+                          <Download className="w-4 h-4" />
+                        )}
+                      </button>
                     </div>
-                    {progressItem &&
-                    progressItem.stage !== 'sent' &&
-                    progressItem.stage !== 'failed' ? (
-                      <Loader2 className="w-4 h-4 animate-spin shrink-0" />
-                    ) : (
-                      <Download className="w-4 h-4 shrink-0" />
-                    )}
-                  </button>
+                  </div>
                   {att.caption && (
-                    <p className="text-xs mt-1 whitespace-pre-wrap opacity-90">
+                    <p className="text-xs mt-1 whitespace-pre-wrap break-words [overflow-wrap:anywhere] opacity-90">
                       {att.caption}
                     </p>
                   )}
@@ -641,7 +854,7 @@ export function MessageBubble({
             })}
 
             {message.content && (
-              <p className="whitespace-pre-wrap">
+              <p className="whitespace-pre-wrap break-words [overflow-wrap:anywhere]">
                 {isDeleted ? message.content : renderMessageText(message.content, isOwn)}
               </p>
             )}
@@ -701,7 +914,7 @@ export function MessageBubble({
           </div>
 
           {!isOwn && !isDeleted && !isPendingOrFailed && (
-            <div className="opacity-0 group-hover:opacity-100 focus-within:opacity-100 transition-opacity flex items-center gap-0.5 pb-1">
+            <div className="opacity-0 group-hover:opacity-100 focus-within:opacity-100 transition-opacity flex items-center gap-0.5 pb-1 shrink-0">
               <button
                 type="button"
                 onClick={() => {
@@ -726,6 +939,7 @@ export function MessageBubble({
               </button>
             </div>
           )}
+          </div>
         </div>
 
         {isOwn && isFailed && !isDeleted && (
@@ -903,6 +1117,78 @@ export function MessageBubble({
           </div>
         )}
       </div>
+
+      <Modal
+        open={fileDetailModal !== null}
+        onClose={() => setFileDetailModal(null)}
+        title="File Details"
+        maxWidth="max-w-md"
+      >
+        {fileDetailModal && (
+          <div className="space-y-4">
+            <div className="rounded-xl bg-[#242424] border border-[#303030] p-3.5 flex items-start gap-3">
+              <div className="w-10 h-10 rounded-lg bg-[#181818] border border-[#303030] flex items-center justify-center shrink-0">
+                <FileText className="w-5 h-5 text-[#FFFFFF]" />
+              </div>
+              <div className="min-w-0 flex-1 space-y-1">
+                <p className="text-xs font-medium text-[#FFFFFF] break-all leading-relaxed">
+                  {fileDetailModal.att.fileName || 'Attachment'}
+                </p>
+                <p className="text-[11px] text-[#999999] font-mono tabular-nums">
+                  {formatFileSize(fileDetailModal.att.fileSize)}
+                  {fileDetailModal.att.mimeType
+                    ? ` · ${fileDetailModal.att.mimeType}`
+                    : ''}
+                </p>
+              </div>
+            </div>
+
+            {fileDetailModal.att.caption && (
+              <div className="rounded-xl bg-[#181818] border border-[#303030] p-3">
+                <p className="text-[11px] text-[#999999] mb-1">Caption</p>
+                <p className="text-xs text-[#FFFFFF] whitespace-pre-wrap break-words [overflow-wrap:anywhere]">
+                  {fileDetailModal.att.caption}
+                </p>
+              </div>
+            )}
+
+            <div className="flex flex-wrap justify-end gap-2">
+              <PrimaryButton
+                variant="secondary"
+                onClick={() => {
+                  const name = fileDetailModal.att.fileName || 'attachment';
+                  navigator.clipboard?.writeText(name);
+                  showToast('Filename copied.', 'info');
+                }}
+                className="text-xs min-h-[38px]"
+              >
+                <Copy className="w-3.5 h-3.5" />
+                <span>Copy Name</span>
+              </PrimaryButton>
+              <PrimaryButton
+                disabled={
+                  isPendingOrFailed || fileDetailModal.att.url.startsWith('blob:')
+                }
+                onClick={() => {
+                  const target = fileDetailModal;
+                  setFileDetailModal(null);
+                  mediaApi
+                    .downloadAttachment(
+                      message.id,
+                      target.index,
+                      target.att.fileName || 'attachment'
+                    )
+                    .catch((err) => showToast(extractApiError(err).message, 'error'));
+                }}
+                className="text-xs min-h-[38px]"
+              >
+                <Download className="w-3.5 h-3.5" />
+                <span>Download</span>
+              </PrimaryButton>
+            </div>
+          </div>
+        )}
+      </Modal>
     </div>
   );
 }

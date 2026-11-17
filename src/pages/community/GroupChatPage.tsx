@@ -762,7 +762,7 @@ export function GroupChatPage() {
         </div>
       )}
 
-      <div className="flex-1 overflow-y-auto py-4 space-y-1">
+      <div className="flex-1 overflow-y-auto overflow-x-hidden py-4 space-y-1">
         {hasMore && (
           <div className="flex justify-center pb-3">
             <PrimaryButton

@@ -75,3 +75,73 @@ export function getInitials(name: string): string {
   if (parts.length === 1) return parts[0].slice(0, 2).toUpperCase();
   return `${parts[0][0]}${parts[parts.length - 1][0]}`.toUpperCase();
 }
+
+function splitGraphemes(input: string): string[] {
+  if (!input) return [];
+  if (typeof Intl !== 'undefined' && 'Segmenter' in Intl) {
+    try {
+      const SegmenterCtor = (
+        Intl as unknown as {
+          Segmenter: new (
+            locale?: string,
+            options?: { granularity: 'grapheme' }
+          ) => { segment: (str: string) => Iterable<{ segment: string }> };
+        }
+      ).Segmenter;
+      const segmenter = new SegmenterCtor(undefined, { granularity: 'grapheme' });
+      return Array.from(segmenter.segment(input), (s) => s.segment);
+    } catch {
+      return Array.from(input);
+    }
+  }
+  return Array.from(input);
+}
+
+export function splitFileNameAndExtension(
+  fileName: string | null | undefined
+): { fullName: string; baseName: string; extension: string } {
+  const raw = (fileName || '').trim();
+  if (!raw) {
+    return { fullName: 'Attachment', baseName: 'Attachment', extension: '' };
+  }
+
+  const lastDot = raw.lastIndexOf('.');
+  if (lastDot > 0 && lastDot < raw.length - 1) {
+    const ext = raw.slice(lastDot);
+    // Treat short non-whitespace suffixes (e.g. .pdf, .docx, .tar.gz -> .gz) as file extensions
+    if (ext.length <= 12 && !/\s/.test(ext)) {
+      return {
+        fullName: raw,
+        baseName: raw.slice(0, lastDot),
+        extension: ext,
+      };
+    }
+  }
+
+  return { fullName: raw, baseName: raw, extension: '' };
+}
+
+export function truncateMiddleFileName(
+  fileName: string | null | undefined,
+  maxChars = 32
+): string {
+  const { fullName, baseName, extension } = splitFileNameAndExtension(fileName);
+  const fullGraphemes = splitGraphemes(fullName);
+  if (fullGraphemes.length <= maxChars) return fullName;
+
+  const baseGraphemes = splitGraphemes(baseName);
+  const extGraphemes = splitGraphemes(extension);
+  const availableForBase = Math.max(6, maxChars - extGraphemes.length - 1);
+
+  if (baseGraphemes.length <= availableForBase) {
+    return `${baseName}${extension}`;
+  }
+
+  const headCount = Math.max(3, Math.ceil(availableForBase * 0.65));
+  const tailCount = Math.max(2, availableForBase - headCount);
+  const head = baseGraphemes.slice(0, headCount).join('');
+  const tail = tailCount > 0 ? baseGraphemes.slice(-tailCount).join('') : '';
+
+  return `${head}…${tail}${extension}`;
+}
+

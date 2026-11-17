@@ -924,7 +924,7 @@ export function MessageScreen({ conversationId }: { conversationId: string }) {
       {/* Message List */}
       <div
         ref={scrollContainerRef}
-        className="flex-1 overflow-y-auto py-4 space-y-1"
+        className="flex-1 overflow-y-auto overflow-x-hidden py-4 space-y-1"
       >
         {hasMore && (
           <div className="flex justify-center pb-3">

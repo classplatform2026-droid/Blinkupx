@@ -40,7 +40,9 @@ export function Modal({
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex items-center justify-between gap-4 pb-4 border-b border-[#303030]">
-          <h2 className="text-base font-semibold tracking-tight">{title}</h2>
+          <h2 className="text-base font-semibold tracking-tight min-w-0 break-words [overflow-wrap:anywhere]">
+            {title}
+          </h2>
           <button
             type="button"
             onClick={onClose}

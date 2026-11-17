@@ -4,7 +4,7 @@ import { useToast } from '../context/ToastContext';
 import type { OutgoingMessagePayload } from '../hooks/useOptimisticChatSender';
 import { extractApiError } from '../services/api';
 import type { Message } from '../types';
-import { formatDuration } from '../utils/formatters';
+import { formatDuration, truncateMiddleFileName } from '../utils/formatters';
 import {
   createStagedMediaItems,
   MAX_MEDIA_FILES_PER_MESSAGE,
@@ -81,6 +81,7 @@ export function MessageInput({
   const typingTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const replaceInputRef = useRef<HTMLInputElement>(null);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
   const [pendingUploadType, setPendingUploadType] = useState<
     'image' | 'video' | 'document'
   >('image');
@@ -101,10 +102,17 @@ export function MessageInput({
       } else {
         setEditingCaptions({});
       }
+      textareaRef.current?.focus();
     } else {
       setEditingCaptions({});
     }
   }, [editingMessage]);
+
+  useEffect(() => {
+    if (replyingTo) {
+      textareaRef.current?.focus();
+    }
+  }, [replyingTo]);
 
   useEffect(() => {
     return () => {
@@ -434,10 +442,10 @@ export function MessageInput({
       />
 
       {(replyingTo || editingMessage) && (
-        <div className="mb-2.5 rounded-xl bg-[#202020] border border-[#303030] px-3.5 py-2 space-y-2">
-          <div className="flex items-center justify-between gap-3">
-            <div className="min-w-0">
-              <p className="text-xs font-semibold text-[#FFFFFF]">
+        <div className="mb-2.5 rounded-xl bg-[#202020] border border-[#303030] px-3.5 py-2 space-y-2 min-w-0 max-w-full overflow-hidden">
+          <div className="flex items-center justify-between gap-3 min-w-0">
+            <div className="min-w-0 flex-1">
+              <p className="text-xs font-semibold text-[#FFFFFF] truncate">
                 {editingMessage
                   ? editingMessage.messageType === 'text'
                     ? 'Editing message'
@@ -452,7 +460,9 @@ export function MessageInput({
                       }`
                     : '') ||
                   replyingTo?.content ||
-                  replyingTo?.messageType}
+                  (replyingTo?.attachments?.[0]?.fileName
+                    ? truncateMiddleFileName(replyingTo.attachments[0].fileName, 44)
+                    : replyingTo?.messageType)}
               </p>
             </div>
             <button
@@ -620,6 +630,7 @@ export function MessageInput({
           </button>
 
           <textarea
+            ref={textareaRef}
             rows={1}
             value={text}
             onChange={(e) => handleTextChange(e.target.value)}
@@ -639,7 +650,7 @@ export function MessageInput({
                   ? 'Add a caption...'
                   : 'Write a message...'
             }
-            className="flex-1 min-h-[44px] max-h-32 resize-none rounded-xl bg-[#242424] border border-[#303030] px-4 py-2.5 text-sm text-[#FFFFFF] placeholder:text-[#999999] focus:border-[#FFFFFF]/40 focus:outline-none"
+            className="flex-1 min-w-0 min-h-[44px] max-h-32 resize-none rounded-xl bg-[#242424] border border-[#303030] px-4 py-2.5 text-sm text-[#FFFFFF] placeholder:text-[#999999] focus:border-[#FFFFFF]/40 focus:outline-none"
           />
 
           {canSubmit ? (
