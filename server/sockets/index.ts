@@ -39,6 +39,7 @@ const socketFocusState = new Map<
     conversationId: string | null;
     communityId: string | null;
     pageVisible: boolean;
+    updatedAt: number;
   }
 >();
 
@@ -78,6 +79,18 @@ export function isUserActivelyViewingConversation(
       return true;
     }
     if (communityId && state.communityId && state.communityId === communityId) {
+      return true;
+    }
+  }
+  return false;
+}
+
+export function isUserForegroundVisible(userId: string): boolean {
+  const set = userSockets.get(userId);
+  if (!set || set.size === 0) return false;
+  for (const sid of set) {
+    const state = socketFocusState.get(sid);
+    if (state && state.pageVisible) {
       return true;
     }
   }
@@ -276,6 +289,7 @@ export function initSocketServer(httpServer: HttpServer): Server {
               ? payload.communityId
               : null,
           pageVisible: Boolean(payload?.pageVisible),
+          updatedAt: Date.now(),
         });
       }
     );
@@ -865,6 +879,10 @@ export function initSocketServer(httpServer: HttpServer): Server {
   });
 
   ioInstance = io;
-  configureCallSignalingRuntime({ io, isUserConnected });
+  configureCallSignalingRuntime({
+    io,
+    isUserConnected,
+    isUserForegroundVisible,
+  });
   return io;
 }

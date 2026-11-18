@@ -1,8 +1,11 @@
 import { Router } from 'express';
 import rateLimit from 'express-rate-limit';
 import {
+  acceptCallHttp,
+  declineCallHttp,
   deleteCallEntry,
   getActiveCall,
+  getCallSession,
   getCallToken,
   listCallHistory,
 } from '../controllers/callController.ts';
@@ -27,6 +30,9 @@ router.use(requireAuth);
 router.post('/token', callTokenRateLimiter, asyncHandler(getCallToken));
 router.get('/active', asyncHandler(getActiveCall));
 router.get('/history', asyncHandler(listCallHistory));
+router.get('/:callId', asyncHandler(getCallSession));
+router.post('/:callId/accept', asyncHandler(acceptCallHttp));
+router.post('/:callId/decline', asyncHandler(declineCallHttp));
 router.delete('/:id', asyncHandler(deleteCallEntry));
 
 export default router;

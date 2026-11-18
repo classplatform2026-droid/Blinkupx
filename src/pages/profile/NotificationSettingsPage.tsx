@@ -3,11 +3,14 @@ import {
   Bell,
   BellOff,
   Eye,
+  Info,
   Laptop,
   MessageSquare,
+  Phone,
   Smartphone,
   Trash2,
   Users,
+  Video,
   Volume2,
 } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
@@ -27,6 +30,8 @@ import {
   isVibrationSupported,
   playNotificationTone,
   SOUND_TONE_OPTIONS,
+  startIncomingRingtone,
+  stopCallTones,
   triggerNotificationVibration,
   type BrowserNotificationSupportState,
 } from '../../utils/notifications';
@@ -64,6 +69,13 @@ export function NotificationSettingsPage() {
   const [devices, setDevices] = useState<PushDeviceSubscription[]>([]);
   const [loadingDevices, setLoadingDevices] = useState(true);
   const [removingDeviceId, setRemovingDeviceId] = useState<string | null>(null);
+  const [testingRingtoneType, setTestingRingtoneType] = useState<'voice' | 'video' | null>(null);
+
+  useEffect(() => {
+    return () => {
+      stopCallTones();
+    };
+  }, []);
 
   const webPushSupported = isWebPushSupported();
   const vibrationSupported = isVibrationSupported();
@@ -193,6 +205,20 @@ export function NotificationSettingsPage() {
     } finally {
       setRemovingDeviceId(null);
     }
+  };
+
+  const handleTestRingtone = (type: 'voice' | 'video') => {
+    if (testingRingtoneType === type) {
+      stopCallTones();
+      setTestingRingtoneType(null);
+      return;
+    }
+    setTestingRingtoneType(type);
+    startIncomingRingtone(true, type);
+    window.setTimeout(() => {
+      stopCallTones();
+      setTestingRingtoneType((curr) => (curr === type ? null : curr));
+    }, 2200);
   };
 
   const categoryRows: Array<{
@@ -405,6 +431,145 @@ export function NotificationSettingsPage() {
                 })}
               </div>
             )}
+          </section>
+
+          {/* Incoming Calls & Ringing */}
+          <section className="rounded-2xl bg-[#202020] border border-[#303030] p-5 space-y-4">
+            <div className="flex items-center gap-2.5">
+              <Phone className="w-4 h-4 text-[#22C55E]" />
+              <div>
+                <h2 className="text-sm font-semibold text-[#FFFFFF]">
+                  Incoming Calls &amp; Ringtones
+                </h2>
+                <p className="text-xs text-[#999999]">
+                  Control background call push alerts and foreground ringtones when BlinkUpZ is open.
+                </p>
+              </div>
+            </div>
+
+            <div className="divide-y divide-[#303030]">
+              {/* Incoming Call Notifications */}
+              <div className="flex items-center justify-between gap-4 py-3.5 first:pt-1">
+                <div>
+                  <p className="text-sm font-medium text-[#FFFFFF]">
+                    Incoming Call Notifications
+                  </p>
+                  <p className="text-xs text-[#999999]">
+                    Receive Web Push alerts for voice and video calls when BlinkUpZ is outside the foreground
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  role="switch"
+                  aria-label="Incoming Call Notifications"
+                  aria-checked={notifications.incomingCalls}
+                  disabled={savingKey === 'incomingCalls'}
+                  onClick={() =>
+                    updateNotificationField(
+                      'incomingCalls',
+                      !notifications.incomingCalls
+                    )
+                  }
+                  className={`w-11 h-6 rounded-full transition-colors p-0.5 cursor-pointer shrink-0 ${
+                    notifications.incomingCalls ? 'bg-[#22C55E]' : 'bg-[#303030]'
+                  }`}
+                >
+                  <span
+                    className={`block w-5 h-5 rounded-full bg-[#FFFFFF] transition-transform ${
+                      notifications.incomingCalls ? 'translate-x-5' : 'translate-x-0'
+                    }`}
+                  />
+                </button>
+              </div>
+
+              {/* Voice Call Ringtone */}
+              <div className="flex items-center justify-between gap-4 py-3.5">
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-center gap-2">
+                    <Phone className="w-3.5 h-3.5 text-[#999999]" />
+                    <p className="text-sm font-medium text-[#FFFFFF]">
+                      Voice Call Ringtone
+                    </p>
+                    <button
+                      type="button"
+                      onClick={() => handleTestRingtone('voice')}
+                      className="text-xs font-medium text-[#22C55E] hover:underline cursor-pointer"
+                    >
+                      {testingRingtoneType === 'voice' ? 'Stop' : 'Test'}
+                    </button>
+                  </div>
+                  <p className="text-xs text-[#999999] mt-0.5">
+                    Loop foreground ringtone when receiving a voice call inside BlinkUpZ
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  role="switch"
+                  aria-label="Voice Call Ringtone"
+                  aria-checked={notifications.voiceCallRingtone}
+                  disabled={savingKey === 'voiceCallRingtone'}
+                  onClick={() =>
+                    updateNotificationField(
+                      'voiceCallRingtone',
+                      !notifications.voiceCallRingtone
+                    )
+                  }
+                  className={`w-11 h-6 rounded-full transition-colors p-0.5 cursor-pointer shrink-0 ${
+                    notifications.voiceCallRingtone ? 'bg-[#22C55E]' : 'bg-[#303030]'
+                  }`}
+                >
+                  <span
+                    className={`block w-5 h-5 rounded-full bg-[#FFFFFF] transition-transform ${
+                      notifications.voiceCallRingtone ? 'translate-x-5' : 'translate-x-0'
+                    }`}
+                  />
+                </button>
+              </div>
+
+              {/* Video Call Ringtone */}
+              <div className="flex items-center justify-between gap-4 py-3.5 last:pb-0">
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-center gap-2">
+                    <Video className="w-3.5 h-3.5 text-[#999999]" />
+                    <p className="text-sm font-medium text-[#FFFFFF]">
+                      Video Call Ringtone
+                    </p>
+                    <button
+                      type="button"
+                      onClick={() => handleTestRingtone('video')}
+                      className="text-xs font-medium text-[#22C55E] hover:underline cursor-pointer"
+                    >
+                      {testingRingtoneType === 'video' ? 'Stop' : 'Test'}
+                    </button>
+                  </div>
+                  <p className="text-xs text-[#999999] mt-0.5">
+                    Loop foreground ringtone when receiving a video call inside BlinkUpZ
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  role="switch"
+                  aria-label="Video Call Ringtone"
+                  aria-checked={notifications.videoCallRingtone}
+                  disabled={savingKey === 'videoCallRingtone'}
+                  onClick={() =>
+                    updateNotificationField(
+                      'videoCallRingtone',
+                      !notifications.videoCallRingtone
+                    )
+                  }
+                  className={`w-11 h-6 rounded-full transition-colors p-0.5 cursor-pointer shrink-0 ${
+                    notifications.videoCallRingtone ? 'bg-[#22C55E]' : 'bg-[#303030]'
+                  }`}
+                >
+                  <span
+                    className={`block w-5 h-5 rounded-full bg-[#FFFFFF] transition-transform ${
+                      notifications.videoCallRingtone ? 'translate-x-5' : 'translate-x-0'
+                    }`}
+                  />
+                </button>
+              </div>
+            </div>
           </section>
 
           {/* Categories */}
@@ -630,6 +795,27 @@ export function NotificationSettingsPage() {
                 />
               </button>
             </div>
+          </section>
+
+          {/* Platform & Background Call Behavior */}
+          <section className="rounded-2xl bg-[#202020] border border-[#303030] p-5 space-y-2.5">
+            <div className="flex items-center gap-2">
+              <Info className="w-4 h-4 text-[#999999] shrink-0" />
+              <h2 className="text-sm font-semibold text-[#FFFFFF]">
+                Background Calls &amp; Platform Notes
+              </h2>
+            </div>
+            <ul className="text-xs text-[#999999] space-y-1.5 leading-relaxed list-disc pl-4">
+              <li>
+                Custom continuous ringtone playback runs while BlinkUpZ is open in the foreground. Outside the foreground, your operating system plays its standard notification sound.
+              </li>
+              <li>
+                Android Chrome &amp; installed PWA support persistent incoming call notifications with Accept/Decline actions (subject to OS battery/Doze policies).
+              </li>
+              <li>
+                On iPhone/iPad (iOS/iPadOS 16.4+), Web Push requires adding BlinkUpZ to your Home Screen via Safari Share &rarr; Add to Home Screen; iOS restricts action buttons and background custom ringtones.
+              </li>
+            </ul>
           </section>
 
           <div className="flex items-center gap-2 text-xs text-[#999999] px-1">

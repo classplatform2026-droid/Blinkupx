@@ -2,7 +2,13 @@ import type { Response } from 'express';
 import { Types } from 'mongoose';
 import type { AuthenticatedRequest } from '../middleware/auth.ts';
 import { CallHistory } from '../models/CallHistory.ts';
-import { getActiveCallForUser, issueCallToken } from '../services/callService.ts';
+import {
+  acceptCall,
+  getActiveCallForUser,
+  getCallSessionForUser,
+  issueCallToken,
+  rejectCall,
+} from '../services/callService.ts';
 import {
   getViewerRelationshipContext,
   PUBLIC_USER_SELECT,
@@ -30,6 +36,56 @@ export async function getActiveCall(req: AuthenticatedRequest, res: Response) {
   res.json({
     success: true,
     data: active,
+  });
+}
+
+export async function getCallSession(req: AuthenticatedRequest, res: Response) {
+  const callId = String(req.params.callId || '').trim();
+  if (!callId || callId.length < 6) {
+    throw new AppError('Valid callId is required.', 400, 'INVALID_CALL_ID');
+  }
+  const result = await getCallSessionForUser({
+    userId: req.userId!,
+    callId,
+  });
+  res.json({
+    success: true,
+    data: result,
+  });
+}
+
+export async function acceptCallHttp(req: AuthenticatedRequest, res: Response) {
+  const callId = String(req.params.callId || '').trim();
+  if (!callId || callId.length < 6) {
+    throw new AppError('Valid callId is required.', 400, 'INVALID_CALL_ID');
+  }
+  const session = await acceptCall({
+    userId: req.userId!,
+    callId,
+  });
+  res.json({
+    success: true,
+    data: session,
+  });
+}
+
+export async function declineCallHttp(req: AuthenticatedRequest, res: Response) {
+  const callId = String(req.params.callId || '').trim();
+  if (!callId || callId.length < 6) {
+    throw new AppError('Valid callId is required.', 400, 'INVALID_CALL_ID');
+  }
+  const reason =
+    typeof req.body?.reason === 'string' && req.body.reason.trim()
+      ? req.body.reason.trim().slice(0, 200)
+      : 'Call declined';
+  const session = await rejectCall({
+    userId: req.userId!,
+    callId,
+    reason,
+  });
+  res.json({
+    success: true,
+    data: session,
   });
 }
 

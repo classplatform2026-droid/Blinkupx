@@ -18,6 +18,7 @@ import {
   Track,
   type LocalTrackPublication,
 } from 'livekit-client';
+import { useLocation, useNavigate } from 'react-router-dom';
 import { useQueryClient } from '@tanstack/react-query';
 import { callApi, extractApiError } from '../services/api';
 import type {
@@ -27,12 +28,14 @@ import type {
   CallType,
 } from '../types';
 import {
+  dismissCallNotificationInSw,
   showBrowserNotification,
   startIncomingRingtone,
   startOutgoingRingback,
   stopCallTones,
   triggerNotificationVibration,
 } from '../utils/notifications';
+import { getActiveBrowserPushSubscription } from '../utils/pushNotifications';
 import { queryKeys } from '../utils/queryClient';
 import { useAuth } from './AuthContext';
 import { useSocket } from './SocketContext';
@@ -134,8 +137,13 @@ export function CallProvider({ children }: { children: React.ReactNode }) {
   const { socket } = useSocket();
   const { showToast } = useToast();
   const qc = useQueryClient();
+  const location = useLocation();
+  const navigate = useNavigate();
 
   const userId = user?.id || '';
+  const incomingCallsEnabled = user?.settings?.notifications?.incomingCalls ?? true;
+  const voiceRingtoneEnabled = user?.settings?.notifications?.voiceCallRingtone ?? true;
+  const videoRingtoneEnabled = user?.settings?.notifications?.videoCallRingtone ?? true;
   const soundEnabled = user?.settings?.notifications?.soundEnabled ?? true;
   const vibrationEnabled = user?.settings?.notifications?.vibrationEnabled ?? true;
 
@@ -167,10 +175,33 @@ export function CallProvider({ children }: { children: React.ReactNode }) {
   const terminalTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const facingModeRef = useRef<'user' | 'environment'>('user');
   const cancelledPendingRef = useRef<boolean>(false);
+  const hasActivePushSubRef = useRef<boolean>(false);
+  const handlingDeepLinkRef = useRef<string | null>(null);
 
   useEffect(() => {
     sessionRef.current = session;
   }, [session]);
+
+  useEffect(() => {
+    if (!userId) {
+      hasActivePushSubRef.current = false;
+      return;
+    }
+    let cancelled = false;
+    const syncPushSubFlag = () => {
+      void getActiveBrowserPushSubscription().then((sub) => {
+        if (!cancelled) {
+          hasActivePushSubRef.current = Boolean(sub);
+        }
+      });
+    };
+    syncPushSubFlag();
+    window.addEventListener('blinkupz:push-subscription-changed', syncPushSubFlag);
+    return () => {
+      cancelled = true;
+      window.removeEventListener('blinkupz:push-subscription-changed', syncPushSubFlag);
+    };
+  }, [userId]);
 
   const callState: CallState = session?.state || 'idle';
 
@@ -260,6 +291,7 @@ export function CallProvider({ children }: { children: React.ReactNode }) {
   const handleTerminalSession = useCallback(
     (incoming: CallSessionSnapshot) => {
       stopCallTones();
+      dismissCallNotificationInSw(incoming.callId);
       void cleanupLiveKitRoom();
       setMinimized(false);
       setSession(incoming);
@@ -552,7 +584,10 @@ export function CallProvider({ children }: { children: React.ReactNode }) {
       session.role === 'receiver' &&
       (session.state === 'initiating' || session.state === 'ringing')
     ) {
-      startIncomingRingtone(soundEnabled);
+      const typeToneEnabled =
+        session.callType === 'video' ? videoRingtoneEnabled : voiceRingtoneEnabled;
+      const allowRing = incomingCallsEnabled && soundEnabled && typeToneEnabled;
+      startIncomingRingtone(allowRing, session.callType);
     } else {
       stopCallTones();
     }
@@ -560,7 +595,16 @@ export function CallProvider({ children }: { children: React.ReactNode }) {
     return () => {
       stopCallTones();
     };
-  }, [session?.callId, session?.role, session?.state, soundEnabled]);
+  }, [
+    session?.callId,
+    session?.role,
+    session?.state,
+    session?.callType,
+    incomingCallsEnabled,
+    voiceRingtoneEnabled,
+    videoRingtoneEnabled,
+    soundEnabled,
+  ]);
 
   // Active call duration ticker
   useEffect(() => {
@@ -589,6 +633,7 @@ export function CallProvider({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     if (!userId) {
       stopCallTones();
+      dismissCallNotificationInSw(null);
       clearTerminalTimer();
       void cleanupLiveKitRoom();
       setSession(null);
@@ -607,17 +652,25 @@ export function CallProvider({ children }: { children: React.ReactNode }) {
       setPermissionError(null);
       setSession({ ...incoming, state: 'ringing' });
       socket.emit('call:ringing', { callId: incoming.callId });
-      if (vibrationEnabled) {
+      if (vibrationEnabled && incomingCallsEnabled) {
         triggerNotificationVibration();
       }
       if (
         typeof document !== 'undefined' &&
-        document.visibilityState !== 'visible'
+        document.visibilityState !== 'visible' &&
+        incomingCallsEnabled &&
+        !hasActivePushSubRef.current
       ) {
         showBrowserNotification({
-          title: `Incoming ${incoming.callType === 'video' ? 'video' : 'voice'} call`,
-          body: `${incoming.peer.fullName} is calling you on BlinkUpZ`,
-          tag: `call-${incoming.callId}`,
+          title:
+            incoming.callType === 'video'
+              ? 'BlinkUpZ — Incoming Video Call'
+              : 'BlinkUpZ — Incoming Voice Call',
+          body:
+            incoming.callType === 'video'
+              ? `${incoming.peer.fullName} is starting a video call.`
+              : `${incoming.peer.fullName} is calling you.`,
+          tag: `blinkupz-call-${incoming.callId}`,
         });
       }
     };
@@ -632,6 +685,7 @@ export function CallProvider({ children }: { children: React.ReactNode }) {
 
     const onAccept = (updated: CallSessionSnapshot) => {
       stopCallTones();
+      dismissCallNotificationInSw(updated.callId);
       clearTerminalTimer();
       const next: CallSessionSnapshot = {
         ...updated,
@@ -658,12 +712,17 @@ export function CallProvider({ children }: { children: React.ReactNode }) {
 
     const onAnsweredElsewhere = (payload: { callId: string }) => {
       stopCallTones();
+      dismissCallNotificationInSw(payload.callId);
       setSession((prev) => {
         if (prev && prev.callId === payload.callId && !roomRef.current) {
           return null;
         }
         return prev;
       });
+    };
+
+    const onDismissNotification = (payload: { callId?: string }) => {
+      dismissCallNotificationInSw(payload?.callId || null);
     };
 
     const onRejected = (updated: CallSessionSnapshot) => {
@@ -741,6 +800,7 @@ export function CallProvider({ children }: { children: React.ReactNode }) {
     socket.on('call:accept', onAccept);
     socket.on('call:state', onStateUpdate);
     socket.on('call:answered_elsewhere', onAnsweredElsewhere);
+    socket.on('call:dismiss_notification', onDismissNotification);
     socket.on('call:reject', onRejected);
     socket.on('call:decline', onRejected);
     socket.on('call:busy', onBusy);
@@ -757,6 +817,7 @@ export function CallProvider({ children }: { children: React.ReactNode }) {
       socket.off('call:accept', onAccept);
       socket.off('call:state', onStateUpdate);
       socket.off('call:answered_elsewhere', onAnsweredElsewhere);
+      socket.off('call:dismiss_notification', onDismissNotification);
       socket.off('call:reject', onRejected);
       socket.off('call:decline', onRejected);
       socket.off('call:busy', onBusy);
@@ -770,6 +831,7 @@ export function CallProvider({ children }: { children: React.ReactNode }) {
   }, [
     socket,
     userId,
+    incomingCallsEnabled,
     vibrationEnabled,
     clearTerminalTimer,
     connectToLiveKitRoom,
@@ -906,63 +968,268 @@ export function CallProvider({ children }: { children: React.ReactNode }) {
     ]
   );
 
+  const acceptSessionFlow = useCallback(
+    async (targetSession: CallSessionSnapshot) => {
+      if (targetSession.role !== 'receiver') return;
+
+      stopCallTones();
+      dismissCallNotificationInSw(targetSession.callId);
+      setPermissionError(null);
+
+      try {
+        await preflightMediaPermissions(targetSession.callType);
+      } catch (err) {
+        const msg =
+          (err as Error)?.message || 'Permission required to answer call.';
+        setPermissionError(msg);
+        showToast(msg, 'error');
+        return;
+      }
+
+      let acceptedSession: CallSessionSnapshot | null = null;
+
+      if (socket?.connected) {
+        const ack = await new Promise<{
+          ok: boolean;
+          data?: CallSessionSnapshot;
+          message?: string;
+        }>((resolve) => {
+          socket
+            .timeout(8000)
+            .emit(
+              'call:accept',
+              { callId: targetSession.callId },
+              (
+                err: Error | null,
+                res?: { ok: boolean; data?: CallSessionSnapshot; message?: string }
+              ) => {
+                if (err) {
+                  resolve({ ok: false, message: 'Accept request timed out.' });
+                  return;
+                }
+                resolve(res || { ok: false, message: 'Failed to accept call.' });
+              }
+            );
+        });
+
+        if (ack.ok && ack.data) {
+          acceptedSession = ack.data;
+        } else {
+          showToast(ack.message || 'Call is no longer available.', 'error');
+          setSession(null);
+          return;
+        }
+      } else {
+        try {
+          acceptedSession = await callApi.accept(targetSession.callId);
+        } catch (err) {
+          showToast(
+            extractApiError(err).message || 'Call is no longer available.',
+            'error'
+          );
+          setSession(null);
+          return;
+        }
+      }
+
+      const next: CallSessionSnapshot = { ...acceptedSession, state: 'connecting' };
+      setSession(next);
+      void connectToLiveKitRoom(next);
+    },
+    [socket, connectToLiveKitRoom, showToast]
+  );
+
   const acceptIncomingCall = useCallback(async () => {
     const curr = sessionRef.current;
-    if (!curr || curr.role !== 'receiver' || !socket?.connected) return;
+    if (!curr || curr.role !== 'receiver') return;
+    await acceptSessionFlow(curr);
+  }, [acceptSessionFlow]);
 
-    stopCallTones();
-    setPermissionError(null);
+  const hydrateIncomingCallFromNotification = useCallback(
+    async (callId: string, action: 'open' | 'accept') => {
+      if (!userId || !callId) return;
+      const dedupeKey = `${callId}:${action}`;
+      if (handlingDeepLinkRef.current === dedupeKey) return;
+      handlingDeepLinkRef.current = dedupeKey;
 
-    try {
-      await preflightMediaPermissions(curr.callType);
-    } catch (err) {
-      const msg =
-        (err as Error)?.message || 'Permission required to answer call.';
-      setPermissionError(msg);
-      showToast(msg, 'error');
-      return;
-    }
+      try {
+        const current = sessionRef.current;
+        if (
+          current &&
+          current.callId === callId &&
+          ['connecting', 'connected', 'reconnecting'].includes(current.state)
+        ) {
+          return;
+        }
 
-    const ack = await new Promise<{
-      ok: boolean;
-      data?: CallSessionSnapshot;
-      message?: string;
-    }>((resolve) => {
-      socket
-        .timeout(8000)
-        .emit(
-          'call:accept',
-          { callId: curr.callId },
-          (
-            err: Error | null,
-            res?: { ok: boolean; data?: CallSessionSnapshot; message?: string }
-          ) => {
-            if (err) {
-              resolve({ ok: false, message: 'Accept request timed out.' });
-              return;
-            }
-            resolve(res || { ok: false, message: 'Failed to accept call.' });
-          }
+        const result = await callApi.getCall(callId);
+        if (!result.canAccept || result.isExpired) {
+          dismissCallNotificationInSw(callId);
+          const msg =
+            result.session.endReason ||
+            (result.isExpired
+              ? 'This incoming call has expired.'
+              : 'This call is no longer active.');
+          showToast(msg, 'info');
+          invalidateHistory();
+          return;
+        }
+
+        clearTerminalTimer();
+        setDurationSeconds(0);
+        setMinimized(false);
+        setPermissionError(null);
+        const ringingSnapshot: CallSessionSnapshot = {
+          ...result.session,
+          state: 'ringing',
+        };
+        setSession(ringingSnapshot);
+
+        if (socket?.connected) {
+          socket.emit('call:ringing', { callId });
+        }
+
+        if (action === 'accept') {
+          await acceptSessionFlow(ringingSnapshot);
+        } else if (vibrationEnabled && incomingCallsEnabled) {
+          triggerNotificationVibration();
+        }
+      } catch (err) {
+        dismissCallNotificationInSw(callId);
+        showToast(
+          extractApiError(err).message || 'This incoming call is no longer available.',
+          'info'
         );
-    });
+      } finally {
+        setTimeout(() => {
+          if (handlingDeepLinkRef.current === dedupeKey) {
+            handlingDeepLinkRef.current = null;
+          }
+        }, 1500);
+      }
+    },
+    [
+      userId,
+      socket,
+      incomingCallsEnabled,
+      vibrationEnabled,
+      clearTerminalTimer,
+      acceptSessionFlow,
+      invalidateHistory,
+      showToast,
+    ]
+  );
 
-    if (!ack.ok || !ack.data) {
-      showToast(ack.message || 'Call is no longer available.', 'error');
-      setSession(null);
+  // Handle incoming call query params from opened PWA/browser notification clicks
+  useEffect(() => {
+    if (!userId || !location.search) return;
+    const params = new URLSearchParams(location.search);
+    const incomingCallId = params.get('incomingCall');
+    if (!incomingCallId) return;
+
+    const callAction = params.get('callAction') === 'accept' ? 'accept' : 'open';
+    const callStatus = params.get('callStatus');
+
+    params.delete('incomingCall');
+    params.delete('callAction');
+    params.delete('callStatus');
+    const cleanSearch = params.toString();
+    navigate(
+      `${location.pathname}${cleanSearch ? `?${cleanSearch}` : ''}`,
+      { replace: true }
+    );
+
+    if (callStatus === 'expired') {
+      dismissCallNotificationInSw(incomingCallId);
+      showToast('This incoming call has already ended.', 'info');
       return;
     }
 
-    const next: CallSessionSnapshot = { ...ack.data, state: 'connecting' };
-    setSession(next);
-    void connectToLiveKitRoom(next);
-  }, [socket, connectToLiveKitRoom, showToast]);
+    void hydrateIncomingCallFromNotification(incomingCallId, callAction);
+  }, [
+    userId,
+    location.pathname,
+    location.search,
+    navigate,
+    hydrateIncomingCallFromNotification,
+    showToast,
+  ]);
+
+  // Listen to Service Worker push notification actions & click messages while app is running
+  useEffect(() => {
+    if (!userId || typeof navigator === 'undefined' || !('serviceWorker' in navigator)) {
+      return;
+    }
+
+    const handleSwMessage = (event: MessageEvent) => {
+      const data = event.data as {
+        type?: string;
+        callId?: string;
+        action?: 'open' | 'accept';
+        canAccept?: boolean;
+        url?: string;
+      } | null;
+
+      if (!data?.type) return;
+
+      if (data.type === 'BLINKUPZ_INCOMING_CALL' && data.callId) {
+        if (typeof data.url === 'string' && data.url.startsWith('/')) {
+          const cleanPath = data.url.split('?')[0];
+          if (cleanPath && cleanPath !== location.pathname) {
+            navigate(cleanPath);
+          }
+        }
+        if (data.canAccept === false) {
+          dismissCallNotificationInSw(data.callId);
+          showToast('This incoming call has already ended.', 'info');
+          return;
+        }
+        void hydrateIncomingCallFromNotification(
+          data.callId,
+          data.action === 'accept' ? 'accept' : 'open'
+        );
+        return;
+      }
+
+      if (data.type === 'BLINKUPZ_SYNC_ACTIVE_CALL' && data.callId) {
+        const curr = sessionRef.current;
+        if (!curr || curr.callId !== data.callId) {
+          void hydrateIncomingCallFromNotification(data.callId, 'open');
+        }
+        return;
+      }
+
+      if (data.type === 'BLINKUPZ_CALL_DECLINED_FROM_NOTIFICATION' && data.callId) {
+        if (sessionRef.current?.callId === data.callId) {
+          stopCallTones();
+          setSession(null);
+        }
+        invalidateHistory();
+      }
+    };
+
+    navigator.serviceWorker.addEventListener('message', handleSwMessage);
+    return () => {
+      navigator.serviceWorker.removeEventListener('message', handleSwMessage);
+    };
+  }, [
+    userId,
+    location.pathname,
+    navigate,
+    hydrateIncomingCallFromNotification,
+    invalidateHistory,
+    showToast,
+  ]);
 
   const rejectIncomingCall = useCallback(async () => {
     const curr = sessionRef.current;
     if (!curr) return;
     stopCallTones();
+    dismissCallNotificationInSw(curr.callId);
     if (socket?.connected) {
       socket.emit('call:reject', { callId: curr.callId, reason: 'Call rejected' });
+    } else {
+      void callApi.decline(curr.callId, 'Call rejected').catch(() => {});
     }
     handleTerminalSession({
       ...curr,

@@ -4,12 +4,14 @@ import { Types } from 'mongoose';
 import type { Server } from 'socket.io';
 import { env, isLiveKitConfigured } from '../config/env.ts';
 import { CallHistory, type CallHistoryStatus } from '../models/CallHistory.ts';
+import { CallSession as CallSessionModel, type ICallSession } from '../models/CallSession.ts';
 import { Conversation, type IConversation } from '../models/Conversation.ts';
 import { Message, type CallEventStatus } from '../models/Message.ts';
 import { User, type IUser } from '../models/User.ts';
 import { AppError } from '../utils/errors.ts';
 import { resolveUserSettings } from '../utils/serializers.ts';
 import { serializeMessage } from './messageService.ts';
+import { dispatchIncomingCallPushNotifications } from './pushService.ts';
 import {
   canViewPrivacyField,
   getBlockRelationship,
@@ -49,7 +51,9 @@ export interface CallSession {
   state: CallState;
   acceptedSocketId: string | null;
   connectedUserIds: Set<string>;
+  ringAcked: boolean;
   startedAt: Date;
+  expiresAt: Date;
   answeredAt: Date | null;
   endedAt: Date | null;
   endReason: string;
@@ -66,38 +70,46 @@ export interface SerializedCallSessionForUser {
   state: CallState;
   peer: CallPeerInfo;
   startedAt: string;
+  expiresAt?: string;
   answeredAt: string | null;
   endedAt: string | null;
   endReason: string;
   recipientOnline?: boolean;
 }
 
-const RING_TIMEOUT_ONLINE_MS = 45_000;
-const RING_TIMEOUT_OFFLINE_MS = 20_000;
 const DISCONNECT_GRACE_ACTIVE_MS = 15_000;
 const DISCONNECT_GRACE_RINGING_MS = 5_000;
+const FOREGROUND_RING_ACK_TIMEOUT_MS = 1_500;
 const CALL_INIT_RATE_WINDOW_MS = 60_000;
 const CALL_INIT_RATE_MAX = 8;
 
 const activeCalls = new Map<string, CallSession>();
 const userActiveCallId = new Map<string, string>();
 const ringTimers = new Map<string, ReturnType<typeof setTimeout>>();
+const pushFallbackTimers = new Map<string, ReturnType<typeof setTimeout>>();
 const disconnectTimers = new Map<string, ReturnType<typeof setTimeout>>();
 const callInitRateMap = new Map<string, number[]>();
 
 let ioRef: Server | null = null;
 let isUserConnectedFn: ((userId: string) => boolean) | null = null;
+let isUserForegroundVisibleFn: ((userId: string) => boolean) | null = null;
 
 export function configureCallSignalingRuntime(params: {
   io: Server;
   isUserConnected: (userId: string) => boolean;
+  isUserForegroundVisible?: (userId: string) => boolean;
 }): void {
   ioRef = params.io;
   isUserConnectedFn = params.isUserConnected;
+  isUserForegroundVisibleFn = params.isUserForegroundVisible || null;
 }
 
 function getIsUserOnline(userId: string): boolean {
   return Boolean(isUserConnectedFn?.(userId));
+}
+
+function getIsUserForeground(userId: string): boolean {
+  return Boolean(isUserForegroundVisibleFn?.(userId));
 }
 
 function clearRingTimer(callId: string): void {
@@ -105,6 +117,14 @@ function clearRingTimer(callId: string): void {
   if (timer) {
     clearTimeout(timer);
     ringTimers.delete(callId);
+  }
+}
+
+function clearPushFallbackTimer(callId: string): void {
+  const timer = pushFallbackTimers.get(callId);
+  if (timer) {
+    clearTimeout(timer);
+    pushFallbackTimers.delete(callId);
   }
 }
 
@@ -130,11 +150,90 @@ function serializeSessionFor(
     state: session.state,
     peer: isCaller ? session.receiver : session.caller,
     startedAt: session.startedAt.toISOString(),
+    expiresAt: session.expiresAt.toISOString(),
     answeredAt: session.answeredAt ? session.answeredAt.toISOString() : null,
     endedAt: session.endedAt ? session.endedAt.toISOString() : null,
     endReason: session.endReason,
     recipientOnline: isCaller ? getIsUserOnline(session.receiverId) : true,
   };
+}
+
+function serializePersistentDocFor(
+  doc: ICallSession,
+  viewerUserId: string
+): SerializedCallSessionForUser {
+  const isCaller = doc.callerId.toString() === viewerUserId;
+  return {
+    callId: doc.callId,
+    roomName: doc.roomName,
+    conversationId: doc.conversationId ? doc.conversationId.toString() : null,
+    callType: doc.callType,
+    role: isCaller ? 'caller' : 'receiver',
+    state: doc.state,
+    peer: isCaller ? doc.receiverInfo : doc.callerInfo,
+    startedAt: doc.startedAt.toISOString(),
+    expiresAt: doc.expiresAt.toISOString(),
+    answeredAt: doc.answeredAt ? doc.answeredAt.toISOString() : null,
+    endedAt: doc.endedAt ? doc.endedAt.toISOString() : null,
+    endReason: doc.endReason || '',
+    recipientOnline: false,
+  };
+}
+
+async function syncCallSessionToDb(session: CallSession): Promise<void> {
+  try {
+    const convObjId =
+      session.conversationId && Types.ObjectId.isValid(session.conversationId)
+        ? new Types.ObjectId(session.conversationId)
+        : null;
+    await CallSessionModel.findOneAndUpdate(
+      { callId: session.callId },
+      {
+        $set: {
+          roomName: session.roomName,
+          conversationId: convObjId,
+          callType: session.callType,
+          callerId: new Types.ObjectId(session.callerId),
+          receiverId: new Types.ObjectId(session.receiverId),
+          callerInfo: session.caller,
+          receiverInfo: session.receiver,
+          state: session.state,
+          startedAt: session.startedAt,
+          expiresAt: session.expiresAt,
+          answeredAt: session.answeredAt,
+          endedAt: session.endedAt,
+          endReason: session.endReason || '',
+        },
+        $setOnInsert: {
+          ttlCleanupAt: new Date(Date.now() + 24 * 60 * 60 * 1000),
+        },
+      },
+      { upsert: true }
+    );
+  } catch (err) {
+    console.error('[CallService] Failed to sync CallSession to MongoDB:', err);
+  }
+}
+
+async function cleanupExpiredDbCallSessions(): Promise<void> {
+  try {
+    const now = new Date();
+    await CallSessionModel.updateMany(
+      {
+        state: { $in: ['initiating', 'ringing'] },
+        expiresAt: { $lte: now },
+      },
+      {
+        $set: {
+          state: 'missed',
+          endedAt: now,
+          endReason: 'Call expired',
+        },
+      }
+    );
+  } catch {
+    // Ignore stale DB cleanup errors
+  }
 }
 
 function emitToUser(userId: string, event: string, payload: unknown): void {
@@ -440,6 +539,7 @@ async function persistAndBroadcastCallEventMessage(params: {
 
 function cleanupSession(session: CallSession): void {
   clearRingTimer(session.callId);
+  clearPushFallbackTimer(session.callId);
   clearDisconnectTimer(session.callerId);
   clearDisconnectTimer(session.receiverId);
 
@@ -472,6 +572,7 @@ async function finalizeSession(params: {
   session.endReason = reason;
 
   cleanupSession(session);
+  void syncCallSessionToDb(session);
 
   const callStatus = resolveCallEventStatus({
     terminalState,
@@ -502,6 +603,11 @@ async function finalizeSession(params: {
     emitToUser(session.callerId, evt, serializeSessionFor(session, session.callerId));
     emitToUser(session.receiverId, evt, serializeSessionFor(session, session.receiverId));
   }
+
+  emitToUser(session.receiverId, 'call:dismiss_notification', {
+    callId: session.callId,
+    reason: session.endReason,
+  });
 }
 
 async function buildPeerInfoWithPrivacy(
@@ -535,6 +641,73 @@ export function getActiveCallForUser(userId: string): SerializedCallSessionForUs
   return serializeSessionFor(session, userId);
 }
 
+export async function getCallSessionForUser(params: {
+  userId: string;
+  callId: string;
+}): Promise<{
+  session: SerializedCallSessionForUser;
+  canAccept: boolean;
+  isExpired: boolean;
+}> {
+  const { userId, callId } = params;
+  let session = activeCalls.get(callId);
+
+  if (
+    session &&
+    (session.state === 'initiating' || session.state === 'ringing') &&
+    Date.now() > session.expiresAt.getTime()
+  ) {
+    await finalizeSession({
+      session,
+      terminalState: 'missed',
+      callerStatus: 'missed',
+      receiverStatus: 'missed',
+      callerDirection: 'outgoing',
+      receiverDirection: 'missed',
+      reason: 'Call expired',
+      eventNames: ['call:missed', 'call:ended'],
+    });
+    session = undefined;
+  }
+
+  if (session) {
+    if (session.callerId !== userId && session.receiverId !== userId) {
+      throw new AppError('You are not authorized to access this call.', 403, 'FORBIDDEN');
+    }
+    const isExpired = Date.now() > session.expiresAt.getTime();
+    const canAccept =
+      session.receiverId === userId &&
+      !isExpired &&
+      (session.state === 'initiating' || session.state === 'ringing');
+    return {
+      session: serializeSessionFor(session, userId),
+      canAccept,
+      isExpired,
+    };
+  }
+
+  const doc = await CallSessionModel.findOne({ callId });
+  if (!doc) {
+    throw new AppError('Call session was not found or has expired.', 404, 'CALL_NOT_FOUND');
+  }
+  if (doc.callerId.toString() !== userId && doc.receiverId.toString() !== userId) {
+    throw new AppError('You are not authorized to access this call.', 403, 'FORBIDDEN');
+  }
+
+  if (doc.state === 'initiating' || doc.state === 'ringing') {
+    doc.state = 'missed';
+    doc.endedAt = new Date();
+    doc.endReason = Date.now() > doc.expiresAt.getTime() ? 'Call expired' : 'Call ended';
+    await doc.save();
+  }
+
+  return {
+    session: serializePersistentDocFor(doc, userId),
+    canAccept: false,
+    isExpired: true,
+  };
+}
+
 export async function initiateCall(params: {
   callerId: string;
   recipientId: string;
@@ -559,6 +732,7 @@ export async function initiateCall(params: {
   }
 
   enforceCallInitiationRateLimit(callerId);
+  void cleanupExpiredDbCallSessions();
 
   if (userActiveCallId.has(callerId)) {
     throw new AppError(
@@ -640,10 +814,12 @@ export async function initiateCall(params: {
 
   const callId = `call_${crypto.randomUUID().replace(/-/g, '')}`;
   const roomName = `blinkupz_${callId}`;
+  const now = new Date();
+  const timeoutMs = env.callRingTimeoutMs;
+  const expiresAt = new Date(now.getTime() + timeoutMs);
 
   // Handle busy recipient without disrupting their existing call
   if (userActiveCallId.has(recipientId)) {
-    const now = new Date();
     const busySession: CallSession = {
       callId,
       roomName,
@@ -656,7 +832,9 @@ export async function initiateCall(params: {
       state: 'ended',
       acceptedSocketId: null,
       connectedUserIds: new Set(),
+      ringAcked: false,
       startedAt: now,
+      expiresAt: now,
       answeredAt: null,
       endedAt: now,
       endReason: 'Recipient is on another call',
@@ -665,6 +843,7 @@ export async function initiateCall(params: {
     };
 
     const busyConv = await ensureDirectConversationForCall(busySession);
+    await syncCallSessionToDb(busySession);
     await persistCallHistoryRecords({
       session: busySession,
       callerStatus: 'busy',
@@ -697,7 +876,9 @@ export async function initiateCall(params: {
     state: 'initiating',
     acceptedSocketId: null,
     connectedUserIds: new Set(),
-    startedAt: new Date(),
+    ringAcked: false,
+    startedAt: now,
+    expiresAt,
     answeredAt: null,
     endedAt: null,
     endReason: '',
@@ -708,8 +889,8 @@ export async function initiateCall(params: {
   activeCalls.set(callId, session);
   userActiveCallId.set(callerId, callId);
   userActiveCallId.set(recipientId, callId);
+  await syncCallSessionToDb(session);
 
-  const timeoutMs = recipientOnline ? RING_TIMEOUT_ONLINE_MS : RING_TIMEOUT_OFFLINE_MS;
   const timer = setTimeout(() => {
     const current = activeCalls.get(callId);
     if (!current) return;
@@ -728,8 +909,55 @@ export async function initiateCall(params: {
   }, timeoutMs);
   ringTimers.set(callId, timer);
 
-  // Notify all connected sockets of the recipient immediately
+  // Notify any connected sockets of the recipient immediately
   emitToUser(recipientId, 'call:incoming', serializeSessionFor(session, recipientId));
+
+  const callerPrivacy = resolveUserSettings(callerUser.settings).privacy;
+  const callerBlockedSet = new Set(
+    (callerUser.blockedUsers || []).map((id) => id.toString())
+  );
+  const triggerIncomingPush = (forcePush: boolean) => {
+    void dispatchIncomingCallPushNotifications({
+      callId: session.callId,
+      callType: session.callType,
+      conversationId: session.conversationId,
+      callerId: session.callerId,
+      callerName: callerUser.fullName,
+      callerUsername: callerUser.username,
+      callerAvatar: callerUser.avatar || '',
+      callerProfilePhotoPrivacy: callerPrivacy.profilePhoto,
+      hasDirectConversation,
+      callerBlockedUsers: callerBlockedSet,
+      recipient: {
+        _id: recipientUser._id as Types.ObjectId,
+        settings: recipientUser.settings,
+        blockedUsers: recipientUser.blockedUsers,
+      },
+      expiresAt: session.expiresAt.getTime(),
+      forcePush,
+    }).catch((err) => {
+      console.error('[CallService] Incoming call Web Push dispatch failed:', err);
+    });
+  };
+
+  // Do not rely on pageVisibility alone: if foreground reports visible, wait briefly for
+  // client ringing acknowledgment before assuming the tab is reachable; otherwise send push immediately.
+  if (!getIsUserForeground(recipientId)) {
+    triggerIncomingPush(true);
+  } else {
+    const fallbackTimer = setTimeout(() => {
+      pushFallbackTimers.delete(callId);
+      const curr = activeCalls.get(callId);
+      if (
+        curr &&
+        (curr.state === 'initiating' || curr.state === 'ringing') &&
+        (!curr.ringAcked || !getIsUserForeground(recipientId))
+      ) {
+        triggerIncomingPush(true);
+      }
+    }, FOREGROUND_RING_ACK_TIMEOUT_MS);
+    pushFallbackTimers.set(callId, fallbackTimer);
+  }
 
   return serializeSessionFor(session, callerId);
 }
@@ -742,8 +970,13 @@ export function acknowledgeRinging(params: {
   if (!session || session.receiverId !== params.userId) {
     return null;
   }
+  session.ringAcked = true;
+  if (getIsUserForeground(params.userId)) {
+    clearPushFallbackTimer(params.callId);
+  }
   if (session.state === 'initiating') {
     session.state = 'ringing';
+    void syncCallSessionToDb(session);
     const payloadForCaller = serializeSessionFor(session, session.callerId);
     emitToUser(session.callerId, 'call:ringing', payloadForCaller);
   }
@@ -757,10 +990,37 @@ export async function acceptCall(params: {
 }): Promise<SerializedCallSessionForUser> {
   const session = activeCalls.get(params.callId);
   if (!session) {
-    throw new AppError('Call is no longer active.', 404, 'CALL_NOT_FOUND');
+    const past = await CallSessionModel.findOne({ callId: params.callId });
+    if (!past) {
+      throw new AppError('Call is no longer active.', 404, 'CALL_NOT_FOUND');
+    }
+    if (past.receiverId.toString() !== params.userId) {
+      throw new AppError('Only the intended recipient can accept this call.', 403, 'FORBIDDEN');
+    }
+    if (past.state === 'missed' || Date.now() > past.expiresAt.getTime()) {
+      throw new AppError('This incoming call has expired.', 410, 'CALL_EXPIRED');
+    }
+    throw new AppError(
+      past.endReason || 'This call has already ended.',
+      409,
+      'CALL_ALREADY_ENDED'
+    );
   }
   if (session.receiverId !== params.userId) {
     throw new AppError('Only the intended recipient can accept this call.', 403, 'FORBIDDEN');
+  }
+  if (Date.now() > session.expiresAt.getTime()) {
+    await finalizeSession({
+      session,
+      terminalState: 'missed',
+      callerStatus: 'missed',
+      receiverStatus: 'missed',
+      callerDirection: 'outgoing',
+      receiverDirection: 'missed',
+      reason: 'Call expired',
+      eventNames: ['call:missed', 'call:ended'],
+    });
+    throw new AppError('This incoming call has expired.', 410, 'CALL_EXPIRED');
   }
   if (session.state !== 'initiating' && session.state !== 'ringing') {
     throw new AppError('Call cannot be accepted in its current state.', 409, 'INVALID_CALL_STATE');
@@ -782,17 +1042,27 @@ export async function acceptCall(params: {
   }
 
   clearRingTimer(session.callId);
+  clearPushFallbackTimer(session.callId);
   session.state = 'connecting';
   session.answeredAt = new Date();
   session.acceptedSocketId = params.socketId || null;
+  await syncCallSessionToDb(session);
 
   const callerPayload = serializeSessionFor(session, session.callerId);
   const receiverPayload = serializeSessionFor(session, session.receiverId);
 
   emitToUser(session.callerId, 'call:accept', callerPayload);
+  emitToUser(session.receiverId, 'call:dismiss_notification', {
+    callId: session.callId,
+    reason: 'accepted',
+  });
   // Sync across recipient's other open tabs so secondary tabs dismiss the incoming ring overlay
   if (ioRef && params.socketId) {
     ioRef.to(`user:${session.receiverId}`).except(params.socketId).emit('call:answered_elsewhere', {
+      callId: session.callId,
+    });
+  } else {
+    emitToUser(session.receiverId, 'call:answered_elsewhere', {
       callId: session.callId,
     });
   }
@@ -807,10 +1077,37 @@ export async function rejectCall(params: {
 }): Promise<SerializedCallSessionForUser> {
   const session = activeCalls.get(params.callId);
   if (!session) {
-    throw new AppError('Call is no longer active.', 404, 'CALL_NOT_FOUND');
+    const past = await CallSessionModel.findOne({ callId: params.callId });
+    if (!past) {
+      throw new AppError('Call is no longer active.', 404, 'CALL_NOT_FOUND');
+    }
+    if (past.receiverId.toString() !== params.userId) {
+      throw new AppError('Only the intended recipient can reject this call.', 403, 'FORBIDDEN');
+    }
+    if (past.state === 'missed' || Date.now() > past.expiresAt.getTime()) {
+      throw new AppError('This incoming call has expired.', 410, 'CALL_EXPIRED');
+    }
+    throw new AppError(
+      past.endReason || 'This call has already ended.',
+      409,
+      'CALL_ALREADY_ENDED'
+    );
   }
   if (session.receiverId !== params.userId) {
     throw new AppError('Only the intended recipient can reject this call.', 403, 'FORBIDDEN');
+  }
+  if (Date.now() > session.expiresAt.getTime()) {
+    await finalizeSession({
+      session,
+      terminalState: 'missed',
+      callerStatus: 'missed',
+      receiverStatus: 'missed',
+      callerDirection: 'outgoing',
+      receiverDirection: 'missed',
+      reason: 'Call expired',
+      eventNames: ['call:missed', 'call:ended'],
+    });
+    throw new AppError('This incoming call has expired.', 410, 'CALL_EXPIRED');
   }
   if (session.state !== 'initiating' && session.state !== 'ringing') {
     throw new AppError('Call cannot be rejected in its current state.', 409, 'INVALID_CALL_STATE');

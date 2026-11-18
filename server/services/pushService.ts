@@ -3,7 +3,10 @@ import * as webpush from 'web-push';
 import { env, isWebPushConfigured } from '../config/env.ts';
 import { PushSubscription, type IPushSubscription } from '../models/PushSubscription.ts';
 import type { IUser } from '../models/User.ts';
-import { isUserActivelyViewingConversation } from '../sockets/index.ts';
+import {
+  isUserActivelyViewingConversation,
+  isUserForegroundVisible,
+} from '../sockets/index.ts';
 import { resolveUserSettings } from '../utils/serializers.ts';
 import { canViewPrivacyField } from './privacyService.ts';
 
@@ -97,7 +100,7 @@ export async function upsertPushSubscription(params: {
         lastUsedAt: new Date(),
       },
     },
-    { upsert: true, new: true }
+    { upsert: true, returnDocument: 'after' }
   );
 
   return doc;
@@ -157,10 +160,22 @@ export async function deleteUserPushSubscriptionById(
 }
 
 export interface PushNotificationPayload {
-  type: 'direct_message' | 'group_message' | 'community_message' | 'community_activity';
+  type:
+    | 'direct_message'
+    | 'group_message'
+    | 'community_message'
+    | 'community_activity'
+    | 'incoming_call';
   messageId?: string;
   conversationId?: string;
   communityId?: string | null;
+  callId?: string;
+  callType?: 'voice' | 'video';
+  callerId?: string;
+  callerName?: string;
+  callerUsername?: string;
+  callerAvatar?: string;
+  expiresAt?: number;
   title: string;
   body: string;
   icon?: string;
@@ -175,9 +190,18 @@ export interface PushNotificationPayload {
 async function sendPayloadToSubscriptions(
   subscriptions: IPushSubscription[],
   eventDedupeKey: string,
-  buildPayloadForSub: (sub: IPushSubscription) => PushNotificationPayload | null
-): Promise<void> {
-  if (!ensureVapidConfigured() || subscriptions.length === 0) return;
+  buildPayloadForSub: (sub: IPushSubscription) => PushNotificationPayload | null,
+  options?: {
+    ttlSeconds?: number;
+    urgency?: 'very-low' | 'low' | 'normal' | 'high';
+  }
+): Promise<number> {
+  if (!ensureVapidConfigured() || subscriptions.length === 0) return 0;
+
+  const ttlSeconds =
+    typeof options?.ttlSeconds === 'number' ? Math.max(5, Math.floor(options.ttlSeconds)) : 86400;
+  const urgency = options?.urgency || 'high';
+  let deliveredCount = 0;
 
   await Promise.allSettled(
     subscriptions.map(async (sub) => {
@@ -200,11 +224,12 @@ async function sendPayloadToSubscriptions(
           },
           JSON.stringify(payload),
           {
-            TTL: 86400,
-            urgency: 'high',
+            TTL: ttlSeconds,
+            urgency,
           }
         );
 
+        deliveredCount += 1;
         await PushSubscription.updateOne(
           { _id: sub._id },
           { $set: { lastUsedAt: new Date(), failureCount: 0 } }
@@ -227,7 +252,7 @@ async function sendPayloadToSubscriptions(
         const updated = await PushSubscription.findByIdAndUpdate(
           sub._id,
           { $inc: { failureCount: 1 } },
-          { new: true }
+          { returnDocument: 'after' }
         ).select('failureCount');
 
         if (updated && updated.failureCount >= 5) {
@@ -236,6 +261,8 @@ async function sendPayloadToSubscriptions(
       }
     })
   );
+
+  return deliveredCount;
 }
 
 export async function dispatchMessagePushNotifications(params: {
@@ -426,4 +453,116 @@ export async function dispatchCommunityActivityPushNotifications(params: {
       timestamp: Date.now(),
     };
   });
+}
+
+export async function dispatchIncomingCallPushNotifications(params: {
+  callId: string;
+  callType: 'voice' | 'video';
+  conversationId: string | null;
+  callerId: string;
+  callerName: string;
+  callerUsername: string;
+  callerAvatar: string;
+  callerProfilePhotoPrivacy: 'everyone' | 'contacts' | 'nobody';
+  hasDirectConversation: boolean;
+  callerBlockedUsers: Set<string>;
+  recipient: {
+    _id: Types.ObjectId;
+    settings?: IUser['settings'];
+    blockedUsers?: Types.ObjectId[];
+  };
+  expiresAt: number;
+  forcePush?: boolean;
+}): Promise<{ delivered: number; skippedReason?: string }> {
+  if (!ensureVapidConfigured()) {
+    return { delivered: 0, skippedReason: 'vapid_not_configured' };
+  }
+
+  const recipientId = params.recipient._id.toString();
+  if (recipientId === params.callerId) {
+    return { delivered: 0, skippedReason: 'caller_self' };
+  }
+
+  const recipientBlockedCaller = Boolean(
+    params.recipient.blockedUsers?.some((id) => id.toString() === params.callerId)
+  );
+  if (recipientBlockedCaller || params.callerBlockedUsers.has(recipientId)) {
+    return { delivered: 0, skippedReason: 'blocked' };
+  }
+
+  const notif = resolveUserSettings(params.recipient.settings).notifications;
+  if (!notif.pushEnabled || !notif.incomingCalls) {
+    return { delivered: 0, skippedReason: 'preferences_disabled' };
+  }
+
+  if (!params.forcePush && isUserForegroundVisible(recipientId)) {
+    return { delivered: 0, skippedReason: 'foreground_visible' };
+  }
+
+  const subscriptions = await PushSubscription.find({
+    userId: params.recipient._id,
+    enabled: true,
+  });
+  if (subscriptions.length === 0) {
+    return { delivered: 0, skippedReason: 'no_subscriptions' };
+  }
+
+  const remainingMs = Math.max(10_000, params.expiresAt - Date.now());
+  const ttlSeconds = Math.min(90, Math.ceil(remainingMs / 1000));
+
+  const canSeeCallerPhoto = canViewPrivacyField(
+    params.callerProfilePhotoPrivacy,
+    false,
+    params.hasDirectConversation,
+    false
+  );
+  const avatarIcon =
+    canSeeCallerPhoto && params.callerAvatar && params.callerAvatar.startsWith('http')
+      ? params.callerAvatar
+      : '/blinkupz-icon.png';
+
+  const basePath = params.conversationId
+    ? `/chats/${params.conversationId}`
+    : '/calls';
+  const targetUrl = `${basePath}?incomingCall=${encodeURIComponent(params.callId)}`;
+
+  const title =
+    params.callType === 'video'
+      ? 'BlinkUpZ — Incoming Video Call'
+      : 'BlinkUpZ — Incoming Voice Call';
+  const body =
+    params.callType === 'video'
+      ? `${params.callerName} is starting a video call.`
+      : `${params.callerName} is calling you.`;
+
+  const callToneEnabled =
+    notif.soundEnabled &&
+    (params.callType === 'video' ? notif.videoCallRingtone : notif.voiceCallRingtone);
+
+  const delivered = await sendPayloadToSubscriptions(
+    subscriptions,
+    `call:${params.callId}`,
+    () => ({
+      type: 'incoming_call',
+      callId: params.callId,
+      callType: params.callType,
+      conversationId: params.conversationId || undefined,
+      callerId: params.callerId,
+      callerName: params.callerName,
+      callerUsername: params.callerUsername,
+      callerAvatar: canSeeCallerPhoto ? params.callerAvatar : '',
+      expiresAt: params.expiresAt,
+      title,
+      body,
+      icon: avatarIcon,
+      tag: `blinkupz-call-${params.callId}`,
+      url: targetUrl,
+      soundEnabled: callToneEnabled,
+      vibrationEnabled: notif.vibrationEnabled,
+      timestamp: Date.now(),
+    }),
+    { ttlSeconds, urgency: 'high' }
+  );
+
+  return { delivered };
 }

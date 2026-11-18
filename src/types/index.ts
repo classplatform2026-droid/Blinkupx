@@ -15,6 +15,9 @@ export interface UserNotificationSettings {
   groupMessages: boolean;
   communityMessages: boolean;
   communityActivity: boolean;
+  incomingCalls: boolean;
+  voiceCallRingtone: boolean;
+  videoCallRingtone: boolean;
   soundEnabled: boolean;
   soundTone: NotificationSoundTone;
   messagePreview: boolean;
@@ -325,6 +328,7 @@ export interface CallSessionSnapshot {
   state: CallState;
   peer: CallPeerInfo;
   startedAt: string;
+  expiresAt?: string;
   answeredAt: string | null;
   endedAt: string | null;
   endReason: string;

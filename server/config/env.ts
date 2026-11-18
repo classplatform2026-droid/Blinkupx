@@ -91,6 +91,10 @@ export const env = {
     apiKey: (process.env.LIVEKIT_API_KEY || '').trim().replace(/^["']|["']$/g, ''),
     apiSecret: (process.env.LIVEKIT_API_SECRET || '').trim().replace(/^["']|["']$/g, ''),
   },
+  callRingTimeoutMs: Math.min(
+    90_000,
+    Math.max(15_000, Number(process.env.CALL_RING_TIMEOUT_MS) || 35_000)
+  ),
   otp: {
     provider: detectedOtpProvider,
     resendApiKey: process.env.RESEND_API_KEY || '',

@@ -1,6 +1,6 @@
 /* BlinkUpZ Unified Service Worker — PWA App Shell, Static Assets, Safe Media Caching & Web Push */
 
-const CACHE_VERSION = 'v3';
+const CACHE_VERSION = 'v4';
 const SHELL_CACHE = `blinkupz-shell-${CACHE_VERSION}`;
 const STATIC_CACHE = `blinkupz-static-${CACHE_VERSION}`;
 const MEDIA_CACHE = `blinkupz-media-${CACHE_VERSION}`;
@@ -104,6 +104,10 @@ self.addEventListener('message', (event) => {
   }
   if (data.type === 'BLINKUPZ_CLEAR_ALL_USER_CACHES') {
     event.waitUntil(Promise.all([caches.delete(MEDIA_CACHE), caches.delete(SHELL_CACHE)]));
+    return;
+  }
+  if (data.type === 'BLINKUPZ_DISMISS_CALL_NOTIFICATION') {
+    event.waitUntil(closeCallNotificationsById(data.callId || null));
   }
 });
 
@@ -269,6 +273,64 @@ self.addEventListener('fetch', (event) => {
 
 /* ---------------- Web Push Notification Handlers ---------------- */
 
+async function closeCallNotificationsById(callId) {
+  try {
+    const notifications = await self.registration.getNotifications();
+    const targetTag = callId ? `blinkupz-call-${callId}` : null;
+    for (const notif of notifications) {
+      const notifData = notif.data || {};
+      const isCallNotif =
+        notifData.type === 'incoming_call' ||
+        (typeof notif.tag === 'string' && notif.tag.startsWith('blinkupz-call-'));
+      if (!isCallNotif) continue;
+      if (!targetTag || notif.tag === targetTag || notifData.callId === callId) {
+        notif.close();
+      }
+    }
+  } catch {
+    // Ignore Notification query errors
+  }
+}
+
+async function cleanupExpiredCallNotifications() {
+  try {
+    const notifications = await self.registration.getNotifications();
+    const now = Date.now();
+    for (const notif of notifications) {
+      const data = notif.data || {};
+      if (data.type === 'incoming_call' && data.expiresAt && now > Number(data.expiresAt)) {
+        notif.close();
+      }
+    }
+  } catch {
+    // Ignore cleanup errors
+  }
+}
+
+function buildIncomingCallTargetUrl(baseUrl, callId, extraParams) {
+  try {
+    const parsed = new URL(
+      typeof baseUrl === 'string' && baseUrl.startsWith('/') ? baseUrl : '/calls',
+      self.location.origin
+    );
+    if (callId) {
+      parsed.searchParams.set('incomingCall', callId);
+    }
+    if (extraParams && typeof extraParams === 'object') {
+      for (const [k, v] of Object.entries(extraParams)) {
+        if (v === null || v === undefined || v === '') {
+          parsed.searchParams.delete(k);
+        } else {
+          parsed.searchParams.set(k, String(v));
+        }
+      }
+    }
+    return parsed.pathname + parsed.search;
+  } catch {
+    return callId ? `/calls?incomingCall=${encodeURIComponent(callId)}` : '/calls';
+  }
+}
+
 self.addEventListener('push', (event) => {
   if (!event.data) return;
 
@@ -287,6 +349,103 @@ self.addEventListener('push', (event) => {
   }
 
   if (!payload || !payload.title) return;
+
+  if (payload.type === 'incoming_call') {
+    if (!payload.callId) return;
+    if (payload.expiresAt && Date.now() > Number(payload.expiresAt)) {
+      return;
+    }
+    if (!rememberMessageId(`call:${payload.callId}`)) {
+      return;
+    }
+
+    const baseTargetUrl =
+      typeof payload.url === 'string' && payload.url.startsWith('/')
+        ? payload.url
+        : payload.conversationId
+          ? `/chats/${payload.conversationId}`
+          : '/calls';
+    const targetUrl = buildIncomingCallTargetUrl(baseTargetUrl, payload.callId);
+
+    event.waitUntil(
+      (async () => {
+        await cleanupExpiredCallNotifications();
+
+        const windowClients = await self.clients.matchAll({
+          type: 'window',
+          includeUncontrolled: true,
+        });
+
+        const focusedVisibleClient = windowClients.find(
+          (client) => client.focused && client.visibilityState === 'visible'
+        );
+
+        if (focusedVisibleClient) {
+          // User already has BlinkUpZ focused in foreground — sync via client instead of duplicate OS push
+          focusedVisibleClient.postMessage({
+            type: 'BLINKUPZ_SYNC_ACTIVE_CALL',
+            callId: payload.callId,
+          });
+          return;
+        }
+
+        const isVideo = payload.callType === 'video';
+        const callerName = payload.callerName || 'Someone';
+        const title =
+          payload.title ||
+          (isVideo ? 'BlinkUpZ — Incoming Video Call' : 'BlinkUpZ — Incoming Voice Call');
+        const body =
+          payload.body ||
+          (isVideo
+            ? `${callerName} is starting a video call.`
+            : `${callerName} is calling you.`);
+
+        const callOptions = {
+          body,
+          icon: payload.icon || '/blinkupz-icon.png',
+          badge: '/blinkupz-badge.png',
+          tag: payload.tag || `blinkupz-call-${payload.callId}`,
+          renotify: true,
+          requireInteraction: true,
+          timestamp:
+            typeof payload.timestamp === 'number' ? payload.timestamp : Date.now(),
+          silent: payload.soundEnabled === false,
+          data: {
+            url: targetUrl,
+            conversationId: payload.conversationId || null,
+            callId: payload.callId,
+            callType: payload.callType || 'voice',
+            callerId: payload.callerId || null,
+            callerName,
+            expiresAt: payload.expiresAt || null,
+            type: 'incoming_call',
+          },
+          actions: [
+            { action: 'accept_call', title: 'Accept' },
+            { action: 'decline_call', title: 'Decline' },
+          ],
+        };
+
+        if (payload.vibrationEnabled !== false) {
+          callOptions.vibrate = [280, 140, 280, 140, 420];
+        }
+
+        await self.registration.showNotification(title, callOptions);
+
+        // Best-effort cleanup if SW remains alive until call expiry deadline
+        if (payload.expiresAt) {
+          const remainingMs = Number(payload.expiresAt) - Date.now();
+          if (remainingMs > 0 && remainingMs <= 90000) {
+            setTimeout(() => {
+              void closeCallNotificationsById(payload.callId);
+            }, remainingMs + 500);
+          }
+        }
+      })()
+    );
+    return;
+  }
+
   if (payload.messageId && !rememberMessageId(payload.messageId)) {
     return;
   }
@@ -298,6 +457,8 @@ self.addEventListener('push', (event) => {
 
   event.waitUntil(
     (async () => {
+      await cleanupExpiredCallNotifications();
+
       const windowClients = await self.clients.matchAll({
         type: 'window',
         includeUncontrolled: true,
@@ -357,11 +518,121 @@ self.addEventListener('push', (event) => {
 self.addEventListener('notificationclick', (event) => {
   event.notification.close();
 
+  const notifData = event.notification.data || {};
+
+  if (notifData.type === 'incoming_call' && notifData.callId) {
+    const callId = String(notifData.callId);
+
+    if (event.action === 'decline_call') {
+      event.waitUntil(
+        (async () => {
+          await closeCallNotificationsById(callId);
+          try {
+            await fetch(`/api/calls/${encodeURIComponent(callId)}/decline`, {
+              method: 'POST',
+              credentials: 'include',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ reason: 'Call declined' }),
+            });
+          } catch {
+            // Ignore network/session errors during background decline
+          }
+
+          const windowClients = await self.clients.matchAll({
+            type: 'window',
+            includeUncontrolled: true,
+          });
+          for (const client of windowClients) {
+            if (client.url.startsWith(self.location.origin)) {
+              client.postMessage({
+                type: 'BLINKUPZ_CALL_DECLINED_FROM_NOTIFICATION',
+                callId,
+              });
+            }
+          }
+        })()
+      );
+      return;
+    }
+
+    const wantAccept = event.action === 'accept_call';
+    event.waitUntil(
+      (async () => {
+        await closeCallNotificationsById(callId);
+
+        let canStillAccept = true;
+        if (notifData.expiresAt && Date.now() > Number(notifData.expiresAt)) {
+          canStillAccept = false;
+        }
+
+        if (canStillAccept) {
+          try {
+            const verifyRes = await fetch(`/api/calls/${encodeURIComponent(callId)}`, {
+              method: 'GET',
+              credentials: 'include',
+            });
+            if (verifyRes.ok) {
+              const json = await verifyRes.json();
+              if (json && json.data && json.data.canAccept === false) {
+                canStillAccept = false;
+              }
+            } else if (
+              verifyRes.status === 404 ||
+              verifyRes.status === 409 ||
+              verifyRes.status === 410
+            ) {
+              canStillAccept = false;
+            }
+          } catch {
+            // If offline/transient or token in memory only, let opened app validate via API/Socket
+          }
+        }
+
+        const baseTarget =
+          typeof notifData.url === 'string' && notifData.url.startsWith('/')
+            ? notifData.url
+            : notifData.conversationId
+              ? `/chats/${notifData.conversationId}`
+              : '/calls';
+
+        const actionMode = wantAccept && canStillAccept ? 'accept' : 'open';
+        const targetPath = buildIncomingCallTargetUrl(baseTarget, callId, {
+          callAction: actionMode === 'accept' ? 'accept' : null,
+          callStatus: canStillAccept ? null : 'expired',
+        });
+        const absoluteTargetUrl = new URL(targetPath, self.location.origin).href;
+
+        const windowClients = await self.clients.matchAll({
+          type: 'window',
+          includeUncontrolled: true,
+        });
+
+        for (const client of windowClients) {
+          if (client.url.startsWith(self.location.origin) && 'focus' in client) {
+            await client.focus();
+            client.postMessage({
+              type: 'BLINKUPZ_INCOMING_CALL',
+              callId,
+              action: actionMode,
+              canAccept: canStillAccept,
+              url: targetPath,
+            });
+            return;
+          }
+        }
+
+        if (self.clients.openWindow) {
+          await self.clients.openWindow(absoluteTargetUrl);
+        }
+      })()
+    );
+    return;
+  }
+
   if (event.action === 'dismiss') {
     return;
   }
 
-  const notifData = event.notification.data || {};
   const targetPath =
     typeof notifData.url === 'string' && notifData.url.startsWith('/')
       ? notifData.url
@@ -370,6 +641,8 @@ self.addEventListener('notificationclick', (event) => {
 
   event.waitUntil(
     (async () => {
+      await cleanupExpiredCallNotifications();
+
       const windowClients = await self.clients.matchAll({
         type: 'window',
         includeUncontrolled: true,

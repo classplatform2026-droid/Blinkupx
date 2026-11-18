@@ -1,8 +1,10 @@
 import type {
+  CallType,
   NotificationSoundTone,
   UserNotificationSettings,
   UserPrivacySettings,
 } from '../types';
+import { postServiceWorkerMessage } from './swRegistration';
 
 export const DEFAULT_PRIVACY_SETTINGS: UserPrivacySettings = {
   lastSeen: 'everyone',
@@ -18,6 +20,9 @@ export const DEFAULT_NOTIFICATION_SETTINGS: UserNotificationSettings = {
   groupMessages: true,
   communityMessages: true,
   communityActivity: true,
+  incomingCalls: true,
+  voiceCallRingtone: true,
+  videoCallRingtone: true,
   soundEnabled: true,
   soundTone: 'chime',
   messagePreview: true,
@@ -178,12 +183,43 @@ export function showBrowserNotification(params: {
 }
 
 let activeCallToneTimer: ReturnType<typeof setInterval> | null = null;
+const activeCallOscillators = new Set<OscillatorNode>();
+let pendingRingUnlockCleanup: (() => void) | null = null;
+
+function clearRingUnlockListeners(): void {
+  if (pendingRingUnlockCleanup) {
+    pendingRingUnlockCleanup();
+    pendingRingUnlockCleanup = null;
+  }
+}
 
 export function stopCallTones(): void {
+  clearRingUnlockListeners();
   if (activeCallToneTimer) {
     clearInterval(activeCallToneTimer);
     activeCallToneTimer = null;
   }
+  for (const osc of activeCallOscillators) {
+    try {
+      osc.stop();
+      osc.disconnect();
+    } catch {
+      // Ignore already stopped oscillators
+    }
+  }
+  activeCallOscillators.clear();
+}
+
+function trackCallOscillator(osc: OscillatorNode): void {
+  activeCallOscillators.add(osc);
+  osc.onended = () => {
+    activeCallOscillators.delete(osc);
+    try {
+      osc.disconnect();
+    } catch {
+      // Ignore disconnect failure
+    }
+  };
 }
 
 export function startOutgoingRingback(enabled = true): void {
@@ -205,6 +241,7 @@ export function startOutgoingRingback(enabled = true): void {
       gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.82);
       osc.connect(gain);
       gain.connect(ctx.destination);
+      trackCallOscillator(osc);
       osc.start(now);
       osc.stop(now + 0.85);
     } catch {
@@ -216,7 +253,10 @@ export function startOutgoingRingback(enabled = true): void {
   activeCallToneTimer = setInterval(playBurst, 2600);
 }
 
-export function startIncomingRingtone(enabled = true): void {
+export function startIncomingRingtone(
+  enabled = true,
+  callType: CallType = 'voice'
+): void {
   stopCallTones();
   if (!enabled) return;
 
@@ -224,28 +264,71 @@ export function startIncomingRingtone(enabled = true): void {
     try {
       const ctx = getAudioContext();
       if (!ctx) return;
+      if (ctx.state === 'suspended') {
+        void ctx.resume().catch(() => {});
+      }
       const now = ctx.currentTime;
-      const playPair = (offset: number, f1: number, f2: number) => {
+
+      const schedulePulse = (
+        offset: number,
+        freqs: number[],
+        pulseDur: number,
+        peak: number
+      ) => {
         const osc = ctx.createOscillator();
         const gain = ctx.createGain();
-        osc.type = 'sine';
-        osc.frequency.setValueAtTime(f1, now + offset);
-        osc.frequency.setValueAtTime(f2, now + offset + 0.14);
+        osc.type = callType === 'video' ? 'triangle' : 'sine';
+        const step = pulseDur / freqs.length;
+        freqs.forEach((f, idx) => {
+          osc.frequency.setValueAtTime(f, now + offset + idx * step);
+        });
         gain.gain.setValueAtTime(0.0001, now + offset);
-        gain.gain.linearRampToValueAtTime(0.065, now + offset + 0.02);
-        gain.gain.exponentialRampToValueAtTime(0.0001, now + offset + 0.34);
+        gain.gain.linearRampToValueAtTime(peak, now + offset + 0.025);
+        gain.gain.exponentialRampToValueAtTime(0.0001, now + offset + pulseDur);
         osc.connect(gain);
         gain.connect(ctx.destination);
+        trackCallOscillator(osc);
         osc.start(now + offset);
-        osc.stop(now + offset + 0.36);
+        osc.stop(now + offset + pulseDur + 0.02);
       };
-      playPair(0, 659.25, 880);
-      playPair(0.42, 659.25, 880);
+
+      if (callType === 'video') {
+        // Crisp 3-note video ringtone phrase
+        schedulePulse(0, [587.33, 739.99, 880], 0.38, 0.065);
+        schedulePulse(0.46, [739.99, 880, 1174.66], 0.4, 0.065);
+      } else {
+        // Classic warm two-pulse voice ringtone
+        schedulePulse(0, [659.25, 880], 0.34, 0.065);
+        schedulePulse(0.42, [659.25, 880], 0.34, 0.065);
+      }
     } catch {
       // Ignore Web Audio autoplay restriction
     }
   };
 
+  if (typeof window !== 'undefined') {
+    const resumeAndPlay = () => {
+      const ctx = getAudioContext();
+      if (ctx && ctx.state === 'suspended') {
+        void ctx.resume().then(() => playRing()).catch(() => {});
+      }
+      clearRingUnlockListeners();
+    };
+    window.addEventListener('pointerdown', resumeAndPlay, { passive: true });
+    window.addEventListener('keydown', resumeAndPlay, { passive: true });
+    pendingRingUnlockCleanup = () => {
+      window.removeEventListener('pointerdown', resumeAndPlay);
+      window.removeEventListener('keydown', resumeAndPlay);
+    };
+  }
+
   playRing();
   activeCallToneTimer = setInterval(playRing, 2400);
+}
+
+export function dismissCallNotificationInSw(callId?: string | null): void {
+  void postServiceWorkerMessage({
+    type: 'BLINKUPZ_DISMISS_CALL_NOTIFICATION',
+    callId: callId || null,
+  });
 }

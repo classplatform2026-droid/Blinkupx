@@ -17,6 +17,9 @@ export interface IUserNotificationSettings {
   groupMessages: boolean;
   communityMessages: boolean;
   communityActivity: boolean;
+  incomingCalls: boolean;
+  voiceCallRingtone: boolean;
+  videoCallRingtone: boolean;
   soundEnabled: boolean;
   soundTone: NotificationSoundTone;
   messagePreview: boolean;
@@ -139,6 +142,9 @@ const userSchema = new Schema<IUser>(
         groupMessages: { type: Boolean, default: true },
         communityMessages: { type: Boolean, default: true },
         communityActivity: { type: Boolean, default: true },
+        incomingCalls: { type: Boolean, default: true },
+        voiceCallRingtone: { type: Boolean, default: true },
+        videoCallRingtone: { type: Boolean, default: true },
         soundEnabled: { type: Boolean, default: true },
         soundTone: { type: String, enum: SOUND_TONE_ENUM, default: 'chime' },
         messagePreview: { type: Boolean, default: true },

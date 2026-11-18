@@ -645,6 +645,31 @@ export const callApi = {
     }>('/calls/active');
     return res.data.data;
   },
+  getCall: async (callId: string) => {
+    const res = await api.get<{
+      success: boolean;
+      data: {
+        session: CallSessionSnapshot;
+        canAccept: boolean;
+        isExpired: boolean;
+      };
+    }>(`/calls/${encodeURIComponent(callId)}`);
+    return res.data.data;
+  },
+  accept: async (callId: string) => {
+    const res = await api.post<{
+      success: boolean;
+      data: CallSessionSnapshot;
+    }>(`/calls/${encodeURIComponent(callId)}/accept`);
+    return res.data.data;
+  },
+  decline: async (callId: string, reason = 'Call declined') => {
+    const res = await api.post<{
+      success: boolean;
+      data: CallSessionSnapshot;
+    }>(`/calls/${encodeURIComponent(callId)}/decline`, { reason });
+    return res.data.data;
+  },
   listHistory: async (filter: 'all' | 'missed' = 'all', q = '') => {
     const res = await api.get<{ success: boolean; data: CallHistoryItem[] }>(
       '/calls/history',

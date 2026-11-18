@@ -1,5 +1,5 @@
 import React from 'react';
-import { BrowserRouter, Navigate, Route, Routes, useSearchParams } from 'react-router-dom';
+import { BrowserRouter, Navigate, Route, Routes, useLocation, useSearchParams } from 'react-router-dom';
 import { BrandMark } from './components/BrandMark';
 import { CallOverlay } from './components/CallOverlay';
 import { AuthProvider, useAuth } from './context/AuthContext';
@@ -45,8 +45,15 @@ function FullScreenLoader() {
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
   const { user, loading } = useAuth();
+  const location = useLocation();
   if (loading) return <FullScreenLoader />;
-  if (!user) return <Navigate to="/" replace />;
+  if (!user) {
+    const dest = `${location.pathname}${location.search}`;
+    if (location.search.includes('incomingCall=') || (location.pathname && location.pathname !== '/chats')) {
+      return <Navigate to={`/login?redirect=${encodeURIComponent(dest)}`} replace />;
+    }
+    return <Navigate to="/" replace />;
+  }
   return <AppLayout>{children}</AppLayout>;
 }
 
