@@ -940,6 +940,7 @@ export function GroupChatPage() {
 
       {canSend ? (
         <MessageInput
+          key={convId}
           enterToSend={user?.settings?.enterToSend ?? true}
           replyingTo={replyingTo}
           editingMessage={editingMessage}

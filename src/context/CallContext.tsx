@@ -29,6 +29,7 @@ import type {
 } from '../types';
 import {
   dismissCallNotificationInSw,
+  retryBlockedIncomingRingtone,
   showBrowserNotification,
   startIncomingRingtone,
   startOutgoingRingback,
@@ -66,6 +67,7 @@ interface CallContextValue {
   selectedAudioOutputId: string;
   supportsAudioOutputSwitch: boolean;
   permissionError: string | null;
+  ringtoneBlocked: boolean;
   minimized: boolean;
   setMinimized: React.Dispatch<React.SetStateAction<boolean>>;
   startCall: (input: StartCallInput) => Promise<void>;
@@ -78,6 +80,7 @@ interface CallContextValue {
   switchCamera: () => Promise<void>;
   switchAudioOutput: (deviceId: string) => Promise<void>;
   unlockAudioPlayback: () => Promise<void>;
+  unlockIncomingRingtone: () => void;
   dismissEndedNotice: () => void;
 }
 
@@ -162,6 +165,7 @@ export function CallProvider({ children }: { children: React.ReactNode }) {
   const [selectedVideoDeviceId, setSelectedVideoDeviceId] = useState('');
   const [selectedAudioOutputId, setSelectedAudioOutputId] = useState('');
   const [permissionError, setPermissionError] = useState<string | null>(null);
+  const [ringtoneBlocked, setRingtoneBlocked] = useState(false);
   const [minimized, setMinimized] = useState(false);
 
   const supportsAudioOutputSwitch =
@@ -291,6 +295,7 @@ export function CallProvider({ children }: { children: React.ReactNode }) {
   const handleTerminalSession = useCallback(
     (incoming: CallSessionSnapshot) => {
       stopCallTones();
+      setRingtoneBlocked(false);
       dismissCallNotificationInSw(incoming.callId);
       void cleanupLiveKitRoom();
       setMinimized(false);
@@ -570,8 +575,9 @@ export function CallProvider({ children }: { children: React.ReactNode }) {
 
   // Manage ringback and ringtone sound loops automatically with call state
   useEffect(() => {
-    if (!session) {
+    if (!session || !userId) {
       stopCallTones();
+      setRingtoneBlocked(false);
       return;
     }
 
@@ -579,27 +585,59 @@ export function CallProvider({ children }: { children: React.ReactNode }) {
       session.role === 'caller' &&
       (session.state === 'initiating' || session.state === 'ringing')
     ) {
+      setRingtoneBlocked(false);
       startOutgoingRingback(soundEnabled);
-    } else if (
-      session.role === 'receiver' &&
-      (session.state === 'initiating' || session.state === 'ringing')
-    ) {
+      return () => {
+        stopCallTones();
+      };
+    }
+
+    if (session.role === 'receiver' && session.state === 'ringing') {
+      const expiresAtMs = session.expiresAt ? new Date(session.expiresAt).getTime() : null;
+      const isAlreadyExpired = Boolean(expiresAtMs && !Number.isNaN(expiresAtMs) && Date.now() > expiresAtMs);
+      if (isAlreadyExpired) {
+        stopCallTones();
+        setRingtoneBlocked(false);
+        return;
+      }
+
       const typeToneEnabled =
         session.callType === 'video' ? videoRingtoneEnabled : voiceRingtoneEnabled;
       const allowRing = incomingCallsEnabled && soundEnabled && typeToneEnabled;
-      startIncomingRingtone(allowRing, session.callType);
-    } else {
-      stopCallTones();
+
+      startIncomingRingtone(allowRing, session.callType, {
+        callId: session.callId,
+        onPlaying: () => setRingtoneBlocked(false),
+        onBlocked: () => setRingtoneBlocked(true),
+        onError: () => setRingtoneBlocked(false),
+      });
+
+      let expiryTimer: ReturnType<typeof setTimeout> | null = null;
+      if (expiresAtMs && !Number.isNaN(expiresAtMs)) {
+        const remaining = Math.max(0, expiresAtMs - Date.now());
+        expiryTimer = setTimeout(() => {
+          stopCallTones();
+          setRingtoneBlocked(false);
+        }, remaining + 250);
+      }
+
+      return () => {
+        if (expiryTimer) clearTimeout(expiryTimer);
+        stopCallTones();
+        setRingtoneBlocked(false);
+      };
     }
 
-    return () => {
-      stopCallTones();
-    };
+    stopCallTones();
+    setRingtoneBlocked(false);
+    return undefined;
   }, [
+    userId,
     session?.callId,
     session?.role,
     session?.state,
     session?.callType,
+    session?.expiresAt,
     incomingCallsEnabled,
     voiceRingtoneEnabled,
     videoRingtoneEnabled,
@@ -633,6 +671,7 @@ export function CallProvider({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     if (!userId) {
       stopCallTones();
+      setRingtoneBlocked(false);
       dismissCallNotificationInSw(null);
       clearTerminalTimer();
       void cleanupLiveKitRoom();
@@ -646,6 +685,24 @@ export function CallProvider({ children }: { children: React.ReactNode }) {
     if (!socket || !userId) return;
 
     const onIncoming = (incoming: CallSessionSnapshot) => {
+      if (!incoming?.callId || incoming.role !== 'receiver') return;
+      if (
+        incoming.expiresAt &&
+        !Number.isNaN(new Date(incoming.expiresAt).getTime()) &&
+        Date.now() > new Date(incoming.expiresAt).getTime()
+      ) {
+        return;
+      }
+
+      const existing = sessionRef.current;
+      if (existing && existing.callId === incoming.callId) {
+        // Deduplicate repeated Socket.IO incoming events for the same call
+        if (existing.state === 'ringing') {
+          socket.emit('call:ringing', { callId: incoming.callId });
+        }
+        return;
+      }
+
       clearTerminalTimer();
       setDurationSeconds(0);
       setMinimized(false);
@@ -775,6 +832,18 @@ export function CallProvider({ children }: { children: React.ReactNode }) {
         synced.role === 'receiver' &&
         (synced.state === 'initiating' || synced.state === 'ringing')
       ) {
+        if (
+          synced.expiresAt &&
+          !Number.isNaN(new Date(synced.expiresAt).getTime()) &&
+          Date.now() > new Date(synced.expiresAt).getTime()
+        ) {
+          return;
+        }
+        const existing = sessionRef.current;
+        if (existing && existing.callId === synced.callId && existing.state === 'ringing') {
+          socket.emit('call:ringing', { callId: synced.callId });
+          return;
+        }
         setSession({ ...synced, state: 'ringing' });
         socket.emit('call:ringing', { callId: synced.callId });
       } else if (
@@ -1350,10 +1419,15 @@ export function CallProvider({ children }: { children: React.ReactNode }) {
     }
   }, []);
 
+  const unlockIncomingRingtone = useCallback(() => {
+    retryBlockedIncomingRingtone();
+  }, []);
+
   const dismissEndedNotice = useCallback(() => {
     clearTerminalTimer();
     setSession(null);
     setPermissionError(null);
+    setRingtoneBlocked(false);
     setMinimized(false);
     setDurationSeconds(0);
   }, [clearTerminalTimer]);
@@ -1378,6 +1452,7 @@ export function CallProvider({ children }: { children: React.ReactNode }) {
         selectedAudioOutputId,
         supportsAudioOutputSwitch,
         permissionError,
+        ringtoneBlocked,
         minimized,
         setMinimized,
         startCall,
@@ -1390,6 +1465,7 @@ export function CallProvider({ children }: { children: React.ReactNode }) {
         switchCamera,
         switchAudioOutput,
         unlockAudioPlayback,
+        unlockIncomingRingtone,
         dismissEndedNotice,
       }}
     >

@@ -1,5 +1,15 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { Mic, Paperclip, Send, Smile, Square, Trash2, X } from 'lucide-react';
+import {
+  Mic,
+  Paperclip,
+  Pause,
+  Play,
+  Send,
+  Smile,
+  Square,
+  Trash2,
+  X,
+} from 'lucide-react';
 import { useToast } from '../context/ToastContext';
 import type { OutgoingMessagePayload } from '../hooks/useOptimisticChatSender';
 import { extractApiError } from '../services/api';
@@ -11,9 +21,15 @@ import {
   resolveBatchMessageType,
   type StagedMediaItem,
 } from '../utils/mediaConfig';
+import {
+  createVoiceRecorderSession,
+  type VoiceRecorderSession,
+  type VoiceRecorderStatus,
+} from '../utils/voiceRecorder';
 import { AttachmentMenu } from './AttachmentMenu';
 import { EmojiPicker } from './EmojiPicker';
 import { MediaComposerStrip } from './MediaComposerStrip';
+import { VoiceMessagePlayer } from './VoiceMessagePlayer';
 
 export type { OutgoingMessagePayload };
 
@@ -70,14 +86,18 @@ export function MessageInput({
   const [editingCaptions, setEditingCaptions] = useState<Record<number, string>>({});
 
   // Voice recording state
-  const [recording, setRecording] = useState(false);
+  const [recordingStatus, setRecordingStatus] =
+    useState<VoiceRecorderStatus>('idle');
   const [recordSeconds, setRecordSeconds] = useState(0);
   const [recordedBlob, setRecordedBlob] = useState<Blob | null>(null);
-  const [recordedPreviewUrl, setRecordedPreviewUrl] = useState<string | null>(null);
+  const [recordedPreviewUrl, setRecordedPreviewUrl] = useState<string | null>(
+    null
+  );
 
-  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
-  const recordChunksRef = useRef<Blob[]>([]);
-  const recordIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const recorderSessionRef = useRef<VoiceRecorderSession | null>(null);
+  const startingRecorderRef = useRef(false);
+  const mountedRef = useRef(true);
+  const recordedPreviewUrlRef = useRef<string | null>(null);
   const typingTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const replaceInputRef = useRef<HTMLInputElement>(null);
@@ -115,12 +135,22 @@ export function MessageInput({
   }, [replyingTo]);
 
   useEffect(() => {
-    return () => {
-      if (recordIntervalRef.current) clearInterval(recordIntervalRef.current);
-      if (typingTimeoutRef.current) clearTimeout(typingTimeoutRef.current);
-      if (recordedPreviewUrl) URL.revokeObjectURL(recordedPreviewUrl);
-    };
+    recordedPreviewUrlRef.current = recordedPreviewUrl;
   }, [recordedPreviewUrl]);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      recorderSessionRef.current?.cancel();
+      recorderSessionRef.current = null;
+      if (typingTimeoutRef.current) clearTimeout(typingTimeoutRef.current);
+      if (recordedPreviewUrlRef.current) {
+        URL.revokeObjectURL(recordedPreviewUrlRef.current);
+        recordedPreviewUrlRef.current = null;
+      }
+    };
+  }, []);
 
   // Revoke any un-sent staged object URLs on unmount
   useEffect(() => {
@@ -351,66 +381,102 @@ export function MessageInput({
     }
   };
 
-  const startRecording = async () => {
-    if (!navigator.mediaDevices?.getUserMedia) {
-      showToast('Voice recording is not supported in this browser.', 'error');
-      return;
+  const clearRecordedPreview = () => {
+    if (recordedPreviewUrlRef.current) {
+      URL.revokeObjectURL(recordedPreviewUrlRef.current);
+      recordedPreviewUrlRef.current = null;
     }
+    setRecordedBlob(null);
+    setRecordedPreviewUrl(null);
+  };
+
+  const startRecording = async () => {
+    if (startingRecorderRef.current || recordingStatus !== 'idle') return;
+    startingRecorderRef.current = true;
+    clearRecordedPreview();
+    setRecordSeconds(0);
+    setShowEmoji(false);
+    setShowAttachments(false);
+
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      const recorder = new MediaRecorder(stream);
-      recordChunksRef.current = [];
+      const session = await createVoiceRecorderSession({
+        onStatusChange: (next) => {
+          if (!mountedRef.current) return;
+          setRecordingStatus(next);
+        },
+        onSecondsChange: (secs) => {
+          if (!mountedRef.current) return;
+          setRecordSeconds(secs);
+        },
+        onError: (msg) => {
+          if (!mountedRef.current) return;
+          recorderSessionRef.current = null;
+          setRecordingStatus('idle');
+          setRecordSeconds(0);
+          showToast(msg, 'error');
+        },
+      });
 
-      recorder.ondataavailable = (ev) => {
-        if (ev.data.size > 0) recordChunksRef.current.push(ev.data);
-      };
-      recorder.onstop = () => {
-        stream.getTracks().forEach((t) => t.stop());
-        const blob = new Blob(recordChunksRef.current, { type: 'audio/webm' });
-        setRecordedBlob(blob);
-        setRecordedPreviewUrl(URL.createObjectURL(blob));
-      };
-
-      mediaRecorderRef.current = recorder;
-      recorder.start();
-      setRecording(true);
-      setRecordSeconds(0);
-      recordIntervalRef.current = setInterval(() => {
-        setRecordSeconds((s) => s + 1);
-      }, 1000);
-    } catch {
-      showToast('Microphone permission is required to record voice messages.', 'error');
+      if (!mountedRef.current) {
+        session.cancel();
+        return;
+      }
+      recorderSessionRef.current = session;
+    } catch (err) {
+      if (mountedRef.current) {
+        const name = (err as { name?: string })?.name || '';
+        const msg =
+          name === 'NotAllowedError' || name === 'PermissionDeniedError'
+            ? 'Microphone permission is required to record voice messages.'
+            : (err as Error)?.message ||
+              'Unable to access microphone for voice recording.';
+        showToast(msg, 'error');
+        setRecordingStatus('idle');
+      }
+    } finally {
+      startingRecorderRef.current = false;
     }
   };
 
-  const stopRecording = () => {
-    if (recordIntervalRef.current) {
-      clearInterval(recordIntervalRef.current);
-      recordIntervalRef.current = null;
+  const pauseRecording = () => {
+    recorderSessionRef.current?.pause();
+  };
+
+  const resumeRecording = () => {
+    recorderSessionRef.current?.resume();
+  };
+
+  const stopRecording = async () => {
+    const session = recorderSessionRef.current;
+    if (!session) return;
+    const result = await session.stop();
+    if (recorderSessionRef.current === session) {
+      recorderSessionRef.current = null;
     }
-    mediaRecorderRef.current?.stop();
-    setRecording(false);
+    if (!mountedRef.current || !result) return;
+
+    clearRecordedPreview();
+    const previewUrl = URL.createObjectURL(result.blob);
+    recordedPreviewUrlRef.current = previewUrl;
+    setRecordedBlob(result.blob);
+    setRecordedPreviewUrl(previewUrl);
+    setRecordSeconds(result.durationSeconds);
   };
 
   const cancelRecording = () => {
-    if (recordIntervalRef.current) {
-      clearInterval(recordIntervalRef.current);
-      recordIntervalRef.current = null;
+    if (recorderSessionRef.current) {
+      recorderSessionRef.current.cancel();
+      recorderSessionRef.current = null;
     }
-    if (mediaRecorderRef.current && recording) {
-      mediaRecorderRef.current.onstop = null;
-      mediaRecorderRef.current.stop();
-      mediaRecorderRef.current.stream.getTracks().forEach((t) => t.stop());
-    }
-    if (recordedPreviewUrl) {
-      URL.revokeObjectURL(recordedPreviewUrl);
-    }
-    setRecording(false);
-    setRecordedBlob(null);
-    setRecordedPreviewUrl(null);
+    clearRecordedPreview();
+    setRecordingStatus('idle');
     setRecordSeconds(0);
   };
 
+  const isRecordingSessionActive =
+    recordingStatus === 'recording' ||
+    recordingStatus === 'paused' ||
+    recordingStatus === 'stopping';
   const canSubmit = Boolean(text.trim() || stagedMedia.length > 0 || editingMessage);
 
   return (
@@ -533,53 +599,132 @@ export function MessageInput({
         />
       )}
 
-      {recording ? (
-        <div className="flex items-center justify-between gap-3 rounded-xl bg-[#242424] border border-[#303030] px-4 py-2.5">
-          <div className="flex items-center gap-3">
-            <span className="w-2.5 h-2.5 rounded-full bg-[#E5484D]" />
-            <span className="text-sm text-[#FFFFFF]">Recording voice message</span>
-            <span className="text-sm font-mono tabular-nums text-[#999999]">
+      {isRecordingSessionActive ? (
+        <div
+          role="region"
+          aria-label="Voice message recording"
+          className="rounded-2xl bg-[#242424] border border-[#303030] px-3.5 py-2.5 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2.5"
+        >
+          <div className="flex items-center justify-between sm:justify-start gap-3 min-w-0">
+            <div className="flex items-center gap-2.5 min-w-0">
+              <span
+                aria-hidden="true"
+                className={`w-2.5 h-2.5 rounded-full shrink-0 ${
+                  recordingStatus === 'paused'
+                    ? 'bg-[#999999]'
+                    : 'bg-[#E5484D] animate-pulse'
+                }`}
+              />
+              <span
+                className={`text-sm font-medium truncate ${
+                  recordingStatus === 'paused'
+                    ? 'text-[#999999]'
+                    : 'text-[#FFFFFF]'
+                }`}
+              >
+                {recordingStatus === 'paused'
+                  ? 'Recording paused'
+                  : recordingStatus === 'stopping'
+                    ? 'Finishing recording...'
+                    : 'Recording voice message'}
+              </span>
+            </div>
+
+            <span className="text-sm font-mono tabular-nums text-[#FFFFFF] shrink-0">
               {formatDuration(recordSeconds)}
             </span>
           </div>
-          <div className="flex items-center gap-2">
+
+          <div className="flex items-center justify-end gap-2 shrink-0">
             <button
               type="button"
               onClick={cancelRecording}
-              aria-label="Cancel recording"
-              className="min-w-[40px] min-h-[40px] rounded-xl flex items-center justify-center text-[#E5484D] hover:bg-[#303030] cursor-pointer"
+              aria-label="Delete recording"
+              title="Delete recording"
+              className="min-w-[44px] min-h-[44px] px-3 rounded-xl bg-[#181818] border border-[#303030] text-[#E5484D] hover:bg-[#303030] flex items-center justify-center gap-1.5 text-xs font-medium transition-colors cursor-pointer"
             >
-              <Trash2 className="w-4 h-4" />
+              <Trash2 className="w-4 h-4 shrink-0" />
+              <span className="sm:hidden">Delete</span>
             </button>
+
             <button
               type="button"
-              onClick={stopRecording}
-              aria-label="Stop recording"
-              className="min-w-[40px] min-h-[40px] rounded-xl bg-[#FFFFFF] text-[#181818] flex items-center justify-center hover:bg-[#E8E8E8] cursor-pointer"
+              disabled={recordingStatus === 'stopping'}
+              onClick={
+                recordingStatus === 'paused' ? resumeRecording : pauseRecording
+              }
+              aria-label={
+                recordingStatus === 'paused'
+                  ? 'Resume recording'
+                  : 'Pause recording'
+              }
+              title={
+                recordingStatus === 'paused'
+                  ? 'Resume recording'
+                  : 'Pause recording'
+              }
+              className={`min-w-[44px] min-h-[44px] px-3 rounded-xl border flex items-center justify-center gap-1.5 text-xs font-medium transition-colors cursor-pointer disabled:opacity-50 ${
+                recordingStatus === 'paused'
+                  ? 'bg-[#22C55E]/15 border-[#22C55E]/40 text-[#22C55E] hover:bg-[#22C55E]/25'
+                  : 'bg-[#181818] border-[#303030] text-[#FFFFFF] hover:bg-[#303030]'
+              }`}
             >
-              <Square className="w-4 h-4 fill-current" />
+              {recordingStatus === 'paused' ? (
+                <>
+                  <Play className="w-4 h-4 fill-current shrink-0" />
+                  <span>Resume</span>
+                </>
+              ) : (
+                <>
+                  <Pause className="w-4 h-4 shrink-0" />
+                  <span>Pause</span>
+                </>
+              )}
+            </button>
+
+            <button
+              type="button"
+              disabled={recordingStatus === 'stopping'}
+              onClick={() => void stopRecording()}
+              aria-label="Stop recording"
+              title="Stop recording"
+              className="min-w-[44px] min-h-[44px] px-3 rounded-xl bg-[#FFFFFF] text-[#181818] flex items-center justify-center gap-1.5 text-xs font-semibold hover:bg-[#E8E8E8] transition-colors cursor-pointer disabled:opacity-50"
+            >
+              <Square className="w-3.5 h-3.5 fill-current shrink-0" />
+              <span>Stop</span>
             </button>
           </div>
         </div>
       ) : recordedPreviewUrl ? (
-        <div className="flex items-center gap-3 rounded-xl bg-[#242424] border border-[#303030] px-3 py-2">
+        <div
+          role="region"
+          aria-label="Voice message preview"
+          className="flex items-center gap-2.5 rounded-2xl bg-[#242424] border border-[#303030] px-2.5 py-2"
+        >
           <button
             type="button"
             onClick={cancelRecording}
             aria-label="Discard voice recording"
-            className="min-w-[40px] min-h-[40px] rounded-xl flex items-center justify-center text-[#E5484D] hover:bg-[#303030] cursor-pointer shrink-0"
+            title="Delete voice recording"
+            className="min-w-[44px] min-h-[44px] rounded-xl flex items-center justify-center text-[#E5484D] hover:bg-[#303030] transition-colors cursor-pointer shrink-0"
           >
             <Trash2 className="w-4 h-4" />
           </button>
-          <audio src={recordedPreviewUrl} controls className="flex-1 h-9 min-w-0" />
-          <span className="text-xs font-mono tabular-nums text-[#999999] shrink-0">
-            {formatDuration(recordSeconds)}
-          </span>
+
+          <div className="flex-1 min-w-0">
+            <VoiceMessagePlayer
+              src={recordedPreviewUrl}
+              variant="preview"
+              fallbackDuration={recordSeconds}
+            />
+          </div>
+
           <button
             type="button"
             onClick={handleSubmit}
             aria-label="Send voice message"
-            className="min-w-[40px] min-h-[40px] rounded-xl bg-[#FFFFFF] text-[#181818] flex items-center justify-center hover:bg-[#E8E8E8] cursor-pointer shrink-0"
+            title="Send voice message"
+            className="min-w-[44px] min-h-[44px] rounded-xl bg-[#FFFFFF] text-[#181818] flex items-center justify-center hover:bg-[#E8E8E8] transition-colors cursor-pointer shrink-0"
           >
             <Send className="w-4 h-4" />
           </button>

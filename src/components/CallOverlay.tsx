@@ -37,6 +37,7 @@ export function CallOverlay() {
     selectedAudioOutputId,
     supportsAudioOutputSwitch,
     permissionError,
+    ringtoneBlocked,
     minimized,
     setMinimized,
     acceptIncomingCall,
@@ -48,6 +49,7 @@ export function CallOverlay() {
     switchCamera,
     switchAudioOutput,
     unlockAudioPlayback,
+    unlockIncomingRingtone,
     dismissEndedNotice,
   } = useCall();
 
@@ -382,6 +384,20 @@ export function CallOverlay() {
               <span className="text-[11px] text-[#999999]">Camera off</span>
             </div>
           )}
+        </div>
+      )}
+
+      {/* Browser Autoplay Fallback for Incoming Ringtone */}
+      {isIncomingRing && ringtoneBlocked && (
+        <div className="relative z-20 mx-auto mb-3 px-4">
+          <button
+            type="button"
+            onClick={unlockIncomingRingtone}
+            className="inline-flex items-center gap-2 min-h-[40px] px-4 py-2 rounded-xl bg-[#242424] border border-[#303030] text-[#FFFFFF] text-xs font-medium hover:bg-[#303030] cursor-pointer"
+          >
+            <Volume2 className="w-4 h-4 text-[#22C55E]" />
+            <span>Tap to play ringtone</span>
+          </button>
         </div>
       )}
 

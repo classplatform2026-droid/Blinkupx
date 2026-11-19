@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   Bell,
   BellOff,
@@ -70,9 +70,14 @@ export function NotificationSettingsPage() {
   const [loadingDevices, setLoadingDevices] = useState(true);
   const [removingDeviceId, setRemovingDeviceId] = useState<string | null>(null);
   const [testingRingtoneType, setTestingRingtoneType] = useState<'voice' | 'video' | null>(null);
+  const previewTimerRef = useRef<number | null>(null);
 
   useEffect(() => {
     return () => {
+      if (previewTimerRef.current !== null) {
+        window.clearTimeout(previewTimerRef.current);
+        previewTimerRef.current = null;
+      }
       stopCallTones();
     };
   }, []);
@@ -208,17 +213,32 @@ export function NotificationSettingsPage() {
   };
 
   const handleTestRingtone = (type: 'voice' | 'video') => {
+    if (previewTimerRef.current !== null) {
+      window.clearTimeout(previewTimerRef.current);
+      previewTimerRef.current = null;
+    }
     if (testingRingtoneType === type) {
       stopCallTones();
       setTestingRingtoneType(null);
       return;
     }
     setTestingRingtoneType(type);
-    startIncomingRingtone(true, type);
-    window.setTimeout(() => {
+    startIncomingRingtone(true, type, {
+      callId: `settings-preview-${type}`,
+      onError: () => {
+        if (previewTimerRef.current !== null) {
+          window.clearTimeout(previewTimerRef.current);
+          previewTimerRef.current = null;
+        }
+        setTestingRingtoneType((curr) => (curr === type ? null : curr));
+        showToast('Unable to play custom ringtone audio.', 'error');
+      },
+    });
+    previewTimerRef.current = window.setTimeout(() => {
+      previewTimerRef.current = null;
       stopCallTones();
       setTestingRingtoneType((curr) => (curr === type ? null : curr));
-    }, 2200);
+    }, 3500);
   };
 
   const categoryRows: Array<{

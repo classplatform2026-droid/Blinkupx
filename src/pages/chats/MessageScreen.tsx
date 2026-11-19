@@ -1076,6 +1076,7 @@ export function MessageScreen({ conversationId }: { conversationId: string }) {
         </div>
       ) : (
         <MessageInput
+          key={conversationId}
           enterToSend={user?.settings?.enterToSend ?? true}
           replyingTo={replyingTo}
           editingMessage={editingMessage}

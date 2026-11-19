@@ -43,6 +43,7 @@ import { FileNameDisplay } from './FileNameDisplay';
 import { Modal } from './Modal';
 import { PrimaryButton } from './PrimaryButton';
 import { UserAvatar } from './UserAvatar';
+import { VoiceMessagePlayer } from './VoiceMessagePlayer';
 
 function renderMessageText(text: string, isOwn: boolean) {
   const regex = /((?:https?:\/\/|www\.)[^\s<>"'`)\]]+)/gi;
@@ -851,37 +852,17 @@ export function MessageBubble({
                 return (
                   <div
                     key={`${att.url}-${index}`}
-                    className="flex flex-col gap-1 w-[min(240px,100%)] max-w-full py-1"
+                    className="w-[min(272px,100%)] sm:w-[290px] max-w-full min-w-0 py-0.5"
                   >
-                    <audio
+                    <VoiceMessagePlayer
                       src={resolvedUrl}
-                      controls
-                      onError={() => tryAuthenticatedMediaFallback(index)}
-                      className="w-full h-9"
+                      variant={isOwn ? 'outgoing' : 'incoming'}
+                      fallbackDuration={att.duration}
+                      unavailable={fallbackUrls[index] === ''}
+                      progressItem={progressItem}
+                      onAudioError={() => tryAuthenticatedMediaFallback(index)}
+                      onRetryUpload={onRetry ? () => onRetry(message) : undefined}
                     />
-                    {progressItem && progressItem.stage !== 'sent' ? (
-                      <span
-                        className={`text-[11px] font-mono tabular-nums ${
-                          isOwn ? 'text-[#555555]' : 'text-[#999999]'
-                        }`}
-                      >
-                        {progressItem.stage === 'uploading'
-                          ? `Uploading · ${progressItem.progress}%`
-                          : progressItem.stage === 'processing'
-                            ? 'Processing...'
-                            : progressItem.stage === 'failed'
-                              ? 'Upload failed'
-                              : 'Preparing...'}
-                      </span>
-                    ) : att.duration ? (
-                      <span
-                        className={`text-[11px] font-mono tabular-nums ${
-                          isOwn ? 'text-[#555555]' : 'text-[#999999]'
-                        }`}
-                      >
-                        Voice · {formatDuration(att.duration)}
-                      </span>
-                    ) : null}
                   </div>
                 );
               }

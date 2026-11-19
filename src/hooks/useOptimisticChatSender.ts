@@ -14,6 +14,7 @@ import {
   resolveBatchMessageType,
   type StagedMediaItem,
 } from '../utils/mediaConfig';
+import { getAudioExtensionFromMime } from '../utils/voiceRecorder';
 import {
   enqueueOfflineOutgoingMessage,
   isLikelyNetworkDisconnectError,
@@ -242,7 +243,9 @@ export function useOptimisticChatSender({
 
               const folder = item.kind === 'voice' ? 'voice' : 'messages';
               const fileNameOverride =
-                item.kind === 'voice' ? `voice-${Date.now()}.webm` : undefined;
+                item.kind === 'voice'
+                  ? `voice-${Date.now()}.${getAudioExtensionFromMime(item.mimeType)}`
+                  : undefined;
 
               setMessages((prev) =>
                 updateOptimisticMediaProgress(prev, clientMessageId, item.clientItemId, {

@@ -182,8 +182,20 @@ export function showBrowserNotification(params: {
   }
 }
 
+export const INCOMING_CALL_RINGTONE_SRC = '/incoming_call_ringtone.mp3';
+
+export interface IncomingRingtoneOptions {
+  callId?: string;
+  onPlaying?: () => void;
+  onBlocked?: () => void;
+  onError?: () => void;
+}
+
 let activeCallToneTimer: ReturnType<typeof setInterval> | null = null;
 const activeCallOscillators = new Set<OscillatorNode>();
+let activeIncomingAudio: HTMLAudioElement | null = null;
+let activeIncomingCallId: string | null = null;
+let incomingRingtoneGeneration = 0;
 let pendingRingUnlockCleanup: (() => void) | null = null;
 
 function clearRingUnlockListeners(): void {
@@ -193,8 +205,30 @@ function clearRingUnlockListeners(): void {
   }
 }
 
-export function stopCallTones(): void {
+function stopIncomingAudioElement(): void {
+  incomingRingtoneGeneration += 1;
+  activeIncomingCallId = null;
   clearRingUnlockListeners();
+
+  const audio = activeIncomingAudio;
+  activeIncomingAudio = null;
+  if (!audio) return;
+
+  try {
+    audio.onplaying = null;
+    audio.onerror = null;
+    audio.onended = null;
+    audio.pause();
+    audio.currentTime = 0;
+    audio.removeAttribute('src');
+    audio.load();
+  } catch {
+    // Ignore audio teardown errors
+  }
+}
+
+export function stopCallTones(): void {
+  stopIncomingAudioElement();
   if (activeCallToneTimer) {
     clearInterval(activeCallToneTimer);
     activeCallToneTimer = null;
@@ -253,77 +287,122 @@ export function startOutgoingRingback(enabled = true): void {
   activeCallToneTimer = setInterval(playBurst, 2600);
 }
 
+export function retryBlockedIncomingRingtone(): void {
+  const audio = activeIncomingAudio;
+  if (!audio) return;
+  const playPromise = audio.play();
+  if (playPromise && typeof playPromise.catch === 'function') {
+    playPromise.catch(() => {});
+  }
+}
+
 export function startIncomingRingtone(
   enabled = true,
-  callType: CallType = 'voice'
+  _callType: CallType = 'voice',
+  options?: IncomingRingtoneOptions
 ): void {
-  stopCallTones();
-  if (!enabled) return;
+  if (!enabled) {
+    stopCallTones();
+    return;
+  }
 
-  const playRing = () => {
-    try {
-      const ctx = getAudioContext();
-      if (!ctx) return;
-      if (ctx.state === 'suspended') {
-        void ctx.resume().catch(() => {});
-      }
-      const now = ctx.currentTime;
+  if (typeof window === 'undefined' || typeof Audio === 'undefined') {
+    return;
+  }
 
-      const schedulePulse = (
-        offset: number,
-        freqs: number[],
-        pulseDur: number,
-        peak: number
-      ) => {
-        const osc = ctx.createOscillator();
-        const gain = ctx.createGain();
-        osc.type = callType === 'video' ? 'triangle' : 'sine';
-        const step = pulseDur / freqs.length;
-        freqs.forEach((f, idx) => {
-          osc.frequency.setValueAtTime(f, now + offset + idx * step);
+  const targetCallId = options?.callId || '__default_incoming_ring__';
+
+  // Prevent duplicate overlapping instances if repeated Socket.IO events fire for the same callId
+  if (activeIncomingAudio && activeIncomingCallId === targetCallId) {
+    if (activeIncomingAudio.paused) {
+      const resumePromise = activeIncomingAudio.play();
+      if (resumePromise && typeof resumePromise.catch === 'function') {
+        resumePromise.catch((err: unknown) => {
+          if ((err as { name?: string })?.name === 'NotAllowedError') {
+            options?.onBlocked?.();
+          }
         });
-        gain.gain.setValueAtTime(0.0001, now + offset);
-        gain.gain.linearRampToValueAtTime(peak, now + offset + 0.025);
-        gain.gain.exponentialRampToValueAtTime(0.0001, now + offset + pulseDur);
-        osc.connect(gain);
-        gain.connect(ctx.destination);
-        trackCallOscillator(osc);
-        osc.start(now + offset);
-        osc.stop(now + offset + pulseDur + 0.02);
-      };
-
-      if (callType === 'video') {
-        // Crisp 3-note video ringtone phrase
-        schedulePulse(0, [587.33, 739.99, 880], 0.38, 0.065);
-        schedulePulse(0.46, [739.99, 880, 1174.66], 0.4, 0.065);
-      } else {
-        // Classic warm two-pulse voice ringtone
-        schedulePulse(0, [659.25, 880], 0.34, 0.065);
-        schedulePulse(0.42, [659.25, 880], 0.34, 0.065);
       }
-    } catch {
-      // Ignore Web Audio autoplay restriction
+    } else {
+      options?.onPlaying?.();
+    }
+    return;
+  }
+
+  stopCallTones();
+
+  const gen = ++incomingRingtoneGeneration;
+  activeIncomingCallId = targetCallId;
+
+  const audio = new Audio(INCOMING_CALL_RINGTONE_SRC);
+  audio.loop = true;
+  audio.preload = 'auto';
+  audio.volume = 1;
+  audio.setAttribute('playsinline', 'true');
+  activeIncomingAudio = audio;
+
+  const attachUnlockListeners = () => {
+    if (pendingRingUnlockCleanup || gen !== incomingRingtoneGeneration) return;
+    const unlock = () => {
+      if (gen !== incomingRingtoneGeneration || activeIncomingAudio !== audio) {
+        clearRingUnlockListeners();
+        return;
+      }
+      void attemptPlay();
+    };
+    window.addEventListener('pointerdown', unlock, { passive: true });
+    window.addEventListener('touchstart', unlock, { passive: true });
+    window.addEventListener('keydown', unlock, { passive: true });
+    pendingRingUnlockCleanup = () => {
+      window.removeEventListener('pointerdown', unlock);
+      window.removeEventListener('touchstart', unlock);
+      window.removeEventListener('keydown', unlock);
+    };
+  };
+
+  let hasNotifiedPlaying = false;
+  const notifyPlaying = () => {
+    clearRingUnlockListeners();
+    if (!hasNotifiedPlaying) {
+      hasNotifiedPlaying = true;
+      options?.onPlaying?.();
     }
   };
 
-  if (typeof window !== 'undefined') {
-    const resumeAndPlay = () => {
-      const ctx = getAudioContext();
-      if (ctx && ctx.state === 'suspended') {
-        void ctx.resume().then(() => playRing()).catch(() => {});
-      }
-      clearRingUnlockListeners();
-    };
-    window.addEventListener('pointerdown', resumeAndPlay, { passive: true });
-    window.addEventListener('keydown', resumeAndPlay, { passive: true });
-    pendingRingUnlockCleanup = () => {
-      window.removeEventListener('pointerdown', resumeAndPlay);
-      window.removeEventListener('keydown', resumeAndPlay);
-    };
-  }
+  audio.onplaying = () => {
+    if (gen !== incomingRingtoneGeneration) return;
+    notifyPlaying();
+  };
 
-  playRing();
-  activeCallToneTimer = setInterval(playRing, 2400);
+  audio.onerror = () => {
+    if (gen !== incomingRingtoneGeneration) return;
+    clearRingUnlockListeners();
+    options?.onError?.();
+  };
+
+  const attemptPlay = async () => {
+    if (gen !== incomingRingtoneGeneration || activeIncomingAudio !== audio) return;
+    hasNotifiedPlaying = false;
+    try {
+      await audio.play();
+      if (gen !== incomingRingtoneGeneration) {
+        audio.pause();
+        return;
+      }
+      notifyPlaying();
+    } catch (err: unknown) {
+      if (gen !== incomingRingtoneGeneration || activeIncomingAudio !== audio) return;
+      const errName = (err as { name?: string })?.name || '';
+      if (errName === 'NotAllowedError') {
+        attachUnlockListeners();
+        options?.onBlocked?.();
+      } else if (errName !== 'AbortError') {
+        options?.onError?.();
+      }
+    }
+  };
+
+  void attemptPlay();
 }
 
 export function dismissCallNotificationInSw(callId?: string | null): void {
