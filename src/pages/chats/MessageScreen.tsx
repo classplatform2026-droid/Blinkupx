@@ -11,6 +11,7 @@ import {
   Pin,
   Search,
   ShieldCheck,
+  Sparkles,
   Trash2,
   User as UserIcon,
   Video,
@@ -64,7 +65,7 @@ export function MessageScreen({ conversationId }: { conversationId: string }) {
 
   const { user, setAuthenticatedUser } = useAuth();
   const { startCall } = useCall();
-  const { socket, presenceMap, typingMap } = useSocket();
+  const { socket, presenceMap, typingMap, aiStatusMap } = useSocket();
   const { showToast } = useToast();
   const qc = useQueryClient();
   const userId = user?.id || '';
@@ -627,9 +628,12 @@ export function MessageScreen({ conversationId }: { conversationId: string }) {
   );
 
   const typingList = isBlockedPair ? [] : typingMap[conversationId] || [];
+  const aiStatus = isBlockedPair ? undefined : aiStatusMap[conversationId];
   let subtitle = '';
   if (isBlockedPair) {
     subtitle = conversation.isBlockedByMe ? 'Blocked' : 'Messaging unavailable';
+  } else if (aiStatus?.status === 'thinking') {
+    subtitle = 'Blink is thinking...';
   } else if (typingList.length > 0) {
     subtitle =
       conversation.type === 'direct'
@@ -711,9 +715,11 @@ export function MessageScreen({ conversationId }: { conversationId: string }) {
             </h2>
             <p
               className={`text-xs truncate ${
-                typingList.length > 0 || peerOnline
-                  ? 'text-[#22C55E]'
-                  : 'text-[#999999]'
+                aiStatus?.status === 'thinking'
+                  ? 'text-[#A3E635]'
+                  : typingList.length > 0 || peerOnline
+                    ? 'text-[#22C55E]'
+                    : 'text-[#999999]'
               }`}
             >
               {subtitle}
@@ -982,7 +988,7 @@ export function MessageScreen({ conversationId }: { conversationId: string }) {
 
                     <MessageBubble
                       message={msg}
-                      isOwn={msg.senderId === user?.id}
+                      isOwn={msg.senderType !== 'ai' && msg.senderId === user?.id}
                       isGroup={conversation.type !== 'direct'}
                       senderRole={roleMap[msg.senderId]}
                       canModerate={canModerate}
@@ -1033,6 +1039,24 @@ export function MessageScreen({ conversationId }: { conversationId: string }) {
                 >
                   Back to latest messages
                 </PrimaryButton>
+              </div>
+            )}
+            {aiStatus?.status === 'thinking' && (
+              <div className="flex items-start gap-2.5 px-3 sm:px-5 py-1.5">
+                <div className="w-8 h-8 rounded-full bg-[#242730] border border-[#3E4554] flex items-center justify-center shrink-0">
+                  <Sparkles className="w-4 h-4 text-[#A3E635] animate-pulse" />
+                </div>
+                <div className="rounded-2xl px-3.5 py-2.5 bg-[#21242B] border border-[#3A404D] text-xs text-[#CCCCCC] inline-flex items-center gap-2">
+                  <Loader2 className="w-3.5 h-3.5 animate-spin text-[#A3E635]" />
+                  <span>Blink is thinking...</span>
+                </div>
+              </div>
+            )}
+            {aiStatus?.status === 'failed' && (
+              <div className="flex justify-center px-4 py-1.5">
+                <span className="text-xs text-[#F87171] bg-[#23191A] border border-[#E5484D]/40 rounded-xl px-3.5 py-2 text-center">
+                  {aiStatus.message || "Blink couldn't respond. Please try again."}
+                </span>
               </div>
             )}
             <div ref={bottomRef} />

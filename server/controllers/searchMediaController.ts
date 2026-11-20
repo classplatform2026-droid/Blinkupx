@@ -23,6 +23,7 @@ import {
   PUBLIC_USER_SELECT,
   serializeUserWithPrivacy,
 } from '../services/privacyService.ts';
+import { BLINK_AI_DISPLAY_NAME } from '../services/ai/blinkIdentity.ts';
 import { AppError } from '../utils/errors.ts';
 import type { SerializedPublicUser } from '../utils/serializers.ts';
 
@@ -101,7 +102,10 @@ export async function globalSearch(req: AuthenticatedRequest, res: Response) {
         conversationName: convName,
         conversationType: conv?.type || 'direct',
         content: m.content,
-        senderName: sender?.fullName || 'User',
+        senderName:
+          m.senderType === 'ai'
+            ? BLINK_AI_DISPLAY_NAME
+            : sender?.fullName || 'User',
         createdAt: m.createdAt,
       };
     });

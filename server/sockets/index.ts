@@ -21,6 +21,7 @@ import {
   reportClientCallState,
 } from '../services/callService.ts';
 import { createAndDispatchMessage } from '../services/messageService.ts';
+import { BLINK_AI_SENDER_ID } from '../services/ai/blinkIdentity.ts';
 import { canViewPrivacyField, getBlockRelationship } from '../services/privacyService.ts';
 import { AppError } from '../utils/errors.ts';
 import { resolveUserSettings } from '../utils/serializers.ts';
@@ -495,7 +496,9 @@ export function initSocketServer(httpServer: HttpServer): Server {
             };
             io.to(`conversation:${cid}`).emit('message:delivered', eventPayload);
             for (const sid of entry.senderIds) {
-              io.to(`user:${sid}`).emit('message:delivered', eventPayload);
+              if (sid !== BLINK_AI_SENDER_ID) {
+                io.to(`user:${sid}`).emit('message:delivered', eventPayload);
+              }
             }
           }
 
@@ -585,7 +588,9 @@ export function initSocketServer(httpServer: HttpServer): Server {
             eventPayload
           );
           for (const sid of senderIds) {
-            io.to(`user:${sid}`).emit('message:delivered', eventPayload);
+            if (sid !== BLINK_AI_SENDER_ID) {
+              io.to(`user:${sid}`).emit('message:delivered', eventPayload);
+            }
           }
           ack?.({ ok: true, messageIds: matchedIds });
         } catch {
@@ -655,7 +660,9 @@ export function initSocketServer(httpServer: HttpServer): Server {
             deliveredPayload
           );
           for (const sid of deliveredSenders) {
-            io.to(`user:${sid}`).emit('message:delivered', deliveredPayload);
+            if (sid !== BLINK_AI_SENDER_ID) {
+              io.to(`user:${sid}`).emit('message:delivered', deliveredPayload);
+            }
           }
         }
 
@@ -706,7 +713,9 @@ export function initSocketServer(httpServer: HttpServer): Server {
               readPayload
             );
             for (const sid of readSenders) {
-              io.to(`user:${sid}`).emit('message:read', readPayload);
+              if (sid !== BLINK_AI_SENDER_ID) {
+                io.to(`user:${sid}`).emit('message:read', readPayload);
+              }
             }
           }
         }

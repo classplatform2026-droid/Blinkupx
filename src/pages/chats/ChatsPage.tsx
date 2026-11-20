@@ -36,7 +36,7 @@ export function ChatsPage() {
   const { conversationId } = useParams<{ conversationId?: string }>();
   const navigate = useNavigate();
   const { user } = useAuth();
-  const { socket, presenceMap, typingMap } = useSocket();
+  const { socket, presenceMap, typingMap, aiStatusMap } = useSocket();
   const { showToast } = useToast();
   const qc = useQueryClient();
 
@@ -288,10 +288,13 @@ export function ChatsPage() {
           ) : (
             conversations.map((conv) => {
               const typingList = typingMap[conv.id] || [];
+              const aiStatus = aiStatusMap[conv.id];
               const typingText =
-                typingList.length > 0
-                  ? `${typingList[0].username} is typing...`
-                  : undefined;
+                aiStatus?.status === 'thinking'
+                  ? 'Blink is thinking...'
+                  : typingList.length > 0
+                    ? `${typingList[0].username} is typing...`
+                    : undefined;
 
               return (
                 <ChatListItem

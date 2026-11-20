@@ -9,6 +9,7 @@ export type MessageType =
   | 'system'
   | 'call_event';
 export type DeliveryStatus = 'sent' | 'delivered' | 'read';
+export type MessageSenderType = 'user' | 'ai';
 export type CallEventStatus =
   | 'completed'
   | 'missed'
@@ -16,6 +17,13 @@ export type CallEventStatus =
   | 'rejected'
   | 'cancelled'
   | 'failed';
+
+export interface IMessageAiMeta {
+  requestId: string;
+  triggerMessageId: string;
+  triggerUserId?: Types.ObjectId | null;
+  status: 'completed' | 'failed';
+}
 
 export interface ICallEventMetadata {
   callId: string;
@@ -54,6 +62,7 @@ export interface IMessageLink {
 export interface IMessage extends Document {
   conversationId: Types.ObjectId;
   senderId: Types.ObjectId;
+  senderType: MessageSenderType;
   clientMessageId?: string | null;
   content: string;
   messageType: MessageType;
@@ -65,6 +74,7 @@ export interface IMessage extends Document {
     senderName: string;
   } | null;
   callEvent: ICallEventMetadata | null;
+  aiMeta: IMessageAiMeta | null;
   reactions: IMessageReaction[];
   editedAt: Date | null;
   deletedAt: Date | null;
@@ -126,6 +136,16 @@ const callEventSchema = new Schema<ICallEventMetadata>(
   { _id: false }
 );
 
+const aiMetaSchema = new Schema<IMessageAiMeta>(
+  {
+    requestId: { type: String, required: true, trim: true, maxlength: 120 },
+    triggerMessageId: { type: String, required: true, trim: true, maxlength: 120 },
+    triggerUserId: { type: Schema.Types.ObjectId, ref: 'User', default: null },
+    status: { type: String, enum: ['completed', 'failed'], default: 'completed' },
+  },
+  { _id: false }
+);
+
 const messageSchema = new Schema<IMessage>(
   {
     conversationId: {
@@ -138,6 +158,11 @@ const messageSchema = new Schema<IMessage>(
       type: Schema.Types.ObjectId,
       ref: 'User',
       required: true,
+    },
+    senderType: {
+      type: String,
+      enum: ['user', 'ai'],
+      default: 'user',
     },
     clientMessageId: {
       type: String,
@@ -177,6 +202,10 @@ const messageSchema = new Schema<IMessage>(
     },
     callEvent: {
       type: callEventSchema,
+      default: null,
+    },
+    aiMeta: {
+      type: aiMetaSchema,
       default: null,
     },
     reactions: {
@@ -219,6 +248,13 @@ messageSchema.index(
   {
     unique: true,
     partialFilterExpression: { 'callEvent.callId': { $type: 'string' } },
+  }
+);
+messageSchema.index(
+  { conversationId: 1, 'aiMeta.triggerMessageId': 1 },
+  {
+    unique: true,
+    partialFilterExpression: { 'aiMeta.triggerMessageId': { $type: 'string' } },
   }
 );
 messageSchema.index({ content: 'text' });

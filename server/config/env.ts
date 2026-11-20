@@ -109,6 +109,58 @@ export const env = {
     webhookUrl: process.env.OTP_WEBHOOK_URL || '',
     webhookSecret: process.env.OTP_WEBHOOK_SECRET || '',
   },
+  gemini: {
+    primaryApiKey: (
+      process.env.GEMINI_PRIMARY_API_KEY ||
+      process.env.GEMINI_API_KEY ||
+      ''
+    )
+      .trim()
+      .replace(/^["']|["']$/g, ''),
+    secondaryApiKey: (process.env.GEMINI_SECONDARY_API_KEY || '')
+      .trim()
+      .replace(/^["']|["']$/g, ''),
+    primaryModel:
+      (process.env.GEMINI_PRIMARY_MODEL || 'gemini-4-hydrogen')
+        .trim()
+        .replace(/^["']|["']$/g, '') || 'gemini-4-hydrogen',
+    secondaryModel:
+      (process.env.GEMINI_SECONDARY_MODEL || 'gemini-3.1-flash-lite')
+        .trim()
+        .replace(/^["']|["']$/g, '') || 'gemini-3.1-flash-lite',
+    requestTimeoutMs: Math.min(
+      60_000,
+      Math.max(5_000, Number(process.env.GEMINI_REQUEST_TIMEOUT_MS) || 25_000)
+    ),
+    cooldownMs: Math.min(
+      300_000,
+      Math.max(10_000, Number(process.env.GEMINI_COOLDOWN_MS) || 60_000)
+    ),
+    contextMessageLimit: Math.min(
+      30,
+      Math.max(4, Number(process.env.AI_CONTEXT_MESSAGE_LIMIT) || 12)
+    ),
+    contextCharBudget: Math.min(
+      24_000,
+      Math.max(1_500, Number(process.env.AI_CONTEXT_CHAR_BUDGET) || 6_000)
+    ),
+    userRateLimitMax: Math.min(
+      60,
+      Math.max(1, Number(process.env.AI_USER_RATE_LIMIT_MAX) || 8)
+    ),
+    userRateLimitWindowMs: Math.min(
+      600_000,
+      Math.max(10_000, Number(process.env.AI_USER_RATE_LIMIT_WINDOW_MS) || 60_000)
+    ),
+    chatRateLimitMax: Math.min(
+      100,
+      Math.max(1, Number(process.env.AI_CHAT_RATE_LIMIT_MAX) || 12)
+    ),
+    chatRateLimitWindowMs: Math.min(
+      600_000,
+      Math.max(10_000, Number(process.env.AI_CHAT_RATE_LIMIT_WINDOW_MS) || 60_000)
+    ),
+  },
 };
 
 export function isCloudinaryConfigured(): boolean {
@@ -163,12 +215,32 @@ export function getMissingOtpVars(): string[] {
   return missing;
 }
 
+export function isBlinkAiConfigured(): boolean {
+  return Boolean(env.gemini.primaryApiKey || env.gemini.secondaryApiKey);
+}
+
+export function validateAiStartupConfig(): void {
+  if (!isBlinkAiConfigured()) {
+    console.warn(
+      '[BlinkAI] No Gemini API key configured (GEMINI_PRIMARY_API_KEY / GEMINI_SECONDARY_API_KEY / GEMINI_API_KEY). Normal messaging remains unaffected.'
+    );
+    return;
+  }
+  const slots: string[] = [];
+  if (env.gemini.primaryApiKey) slots.push('primary');
+  if (env.gemini.secondaryApiKey) slots.push('secondary');
+  console.info(
+    `[BlinkAI] Ready (${slots.join('+')} key slot${slots.length > 1 ? 's' : ''}, primaryModel=${env.gemini.primaryModel}, secondaryModel=${env.gemini.secondaryModel}).`
+  );
+}
+
 export function getServiceStatus() {
   return {
     database: env.mongodbUri ? 'configured' : 'local-fallback',
     cloudinary: isCloudinaryConfigured(),
     webPush: isWebPushConfigured(),
     livekit: isLiveKitConfigured(),
+    blinkAi: isBlinkAiConfigured(),
     otpProvider: isOtpProviderConfigured(),
     otpProviderType: env.otp.provider,
     missingOtpVars: getMissingOtpVars(),

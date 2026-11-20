@@ -6,7 +6,7 @@ import express from 'express';
 import helmet from 'helmet';
 import mongoose from 'mongoose';
 import { connectDatabase } from './server/config/db.ts';
-import { env, getServiceStatus } from './server/config/env.ts';
+import { env, getServiceStatus, validateAiStartupConfig } from './server/config/env.ts';
 import { apiRateLimiter } from './server/middleware/rateLimit.ts';
 import { sanitizeRequest } from './server/middleware/sanitize.ts';
 import authRoutes from './server/routes/authRoutes.ts';
@@ -129,6 +129,7 @@ async function bootstrap() {
   // Start HTTP server immediately on port 3000, connect MongoDB in parallel
   httpServer.listen(env.port, '0.0.0.0', () => {
     console.log(`[BlinkUpZ] Server listening on http://0.0.0.0:${env.port}`);
+    validateAiStartupConfig();
   });
 
   connectDatabase().catch((err) => {

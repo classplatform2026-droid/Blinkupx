@@ -13,6 +13,7 @@ import {
   Search,
   Settings,
   Shield,
+  Sparkles,
   Users,
   X,
 } from 'lucide-react';
@@ -68,7 +69,7 @@ export function GroupChatPage() {
   const highlightId = searchParams.get('highlight');
   const navigate = useNavigate();
   const { user } = useAuth();
-  const { socket, typingMap } = useSocket();
+  const { socket, typingMap, aiStatusMap } = useSocket();
   const { showToast } = useToast();
   const qc = useQueryClient();
   const userId = user?.id || '';
@@ -579,6 +580,7 @@ export function GroupChatPage() {
   const isOwner = community.myRole === 'owner';
 
   const typingList = typingMap[convId] || [];
+  const aiStatus = convId ? aiStatusMap[convId] : undefined;
   const filteredMessages = searchQuery.trim()
     ? messages.filter((m) =>
         m.content.toLowerCase().includes(searchQuery.trim().toLowerCase())
@@ -609,7 +611,11 @@ export function GroupChatPage() {
                 {community.name}
               </h1>
               <p className="text-xs text-[#999999] font-mono tabular-nums truncate">
-                {typingList.length > 0 ? (
+                {aiStatus?.status === 'thinking' ? (
+                  <span className="text-[#A3E635] font-sans">
+                    Blink is thinking...
+                  </span>
+                ) : typingList.length > 0 ? (
                   <span className="text-[#22C55E] font-sans">
                     {typingList[0].username} is typing...
                   </span>
@@ -816,7 +822,7 @@ export function GroupChatPage() {
                     )}
                     <MessageBubble
                       message={msg}
-                      isOwn={msg.senderId === user?.id}
+                      isOwn={msg.senderType !== 'ai' && msg.senderId === user?.id}
                       isGroup
                       senderRole={roleMap[msg.senderId]}
                       canModerate={canModerate}
@@ -918,6 +924,24 @@ export function GroupChatPage() {
                 >
                   Back to latest messages
                 </PrimaryButton>
+              </div>
+            )}
+            {aiStatus?.status === 'thinking' && (
+              <div className="flex items-start gap-2.5 px-3 sm:px-5 py-1.5">
+                <div className="w-8 h-8 rounded-full bg-[#242730] border border-[#3E4554] flex items-center justify-center shrink-0">
+                  <Sparkles className="w-4 h-4 text-[#A3E635] animate-pulse" />
+                </div>
+                <div className="rounded-2xl px-3.5 py-2.5 bg-[#21242B] border border-[#3A404D] text-xs text-[#CCCCCC] inline-flex items-center gap-2">
+                  <Loader2 className="w-3.5 h-3.5 animate-spin text-[#A3E635]" />
+                  <span>Blink is thinking...</span>
+                </div>
+              </div>
+            )}
+            {aiStatus?.status === 'failed' && (
+              <div className="flex justify-center px-4 py-1.5">
+                <span className="text-xs text-[#F87171] bg-[#23191A] border border-[#E5484D]/40 rounded-xl px-3.5 py-2 text-center">
+                  {aiStatus.message || "Blink couldn't respond. Please try again."}
+                </span>
               </div>
             )}
             <div ref={bottomRef} />

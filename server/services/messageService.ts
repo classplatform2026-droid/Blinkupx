@@ -12,28 +12,38 @@ import {
   type ViewerRelationshipContext,
 } from './privacyService.ts';
 import { dispatchMessagePushNotifications } from './pushService.ts';
+import {
+  BLINK_AI_DISPLAY_NAME,
+  BLINK_AI_SENDER_ID,
+  BLINK_AI_SERIALIZED_SENDER,
+  isAiMessageLike,
+} from './ai/blinkIdentity.ts';
+import { maybeTriggerBlinkReply } from './ai/blinkRouter.ts';
 import { AppError } from '../utils/errors.ts';
 import { extractAndFetchLinkPreviews, extractUrlStubs } from '../utils/linkPreview.ts';
 import { resolveUserSettings } from '../utils/serializers.ts';
 import { sendMessageSchema } from '../validators/schemas.ts';
 
 export function serializeMessage(msg: IMessage, viewerContext?: ViewerRelationshipContext) {
+  const isAi = isAiMessageLike(msg);
   const rawSender = msg.senderId as unknown;
   const senderObj =
-    typeof rawSender === 'object' && rawSender !== null && 'fullName' in rawSender
+    !isAi && typeof rawSender === 'object' && rawSender !== null && 'fullName' in rawSender
       ? (rawSender as PrivacyTargetUserLike)
       : null;
 
-  const senderSerialized = senderObj
-    ? viewerContext
-      ? serializeUserWithPrivacy(senderObj, viewerContext)
-      : {
-          id: senderObj._id.toString(),
-          fullName: senderObj.fullName,
-          username: senderObj.username,
-          avatar: senderObj.avatar || '',
-        }
-    : null;
+  const senderSerialized = isAi
+    ? BLINK_AI_SERIALIZED_SENDER
+    : senderObj
+      ? viewerContext
+        ? serializeUserWithPrivacy(senderObj, viewerContext)
+        : {
+            id: senderObj._id.toString(),
+            fullName: senderObj.fullName,
+            username: senderObj.username,
+            avatar: senderObj.avatar || '',
+          }
+      : null;
 
   const rawReply = msg.replyTo as unknown;
   const replyObj =
@@ -42,6 +52,7 @@ export function serializeMessage(msg: IMessage, viewerContext?: ViewerRelationsh
           _id: { toString(): string };
           content: string;
           messageType: string;
+          senderType?: string;
           deletedAt?: Date | null;
           senderId?: { _id?: { toString(): string }; fullName?: string; username?: string };
         })
@@ -52,7 +63,12 @@ export function serializeMessage(msg: IMessage, viewerContext?: ViewerRelationsh
   return {
     id: msg._id.toString(),
     conversationId: msg.conversationId.toString(),
-    senderId: senderObj ? senderObj._id.toString() : String(msg.senderId),
+    senderId: isAi
+      ? BLINK_AI_SENDER_ID
+      : senderObj
+        ? senderObj._id.toString()
+        : String(msg.senderId),
+    senderType: isAi ? ('ai' as const) : ('user' as const),
     clientMessageId: msg.clientMessageId || null,
     sender: senderSerialized
       ? {
@@ -60,6 +76,7 @@ export function serializeMessage(msg: IMessage, viewerContext?: ViewerRelationsh
           fullName: senderSerialized.fullName,
           username: senderSerialized.username,
           avatar: senderSerialized.avatar || '',
+          ...(isAi ? { isAi: true } : {}),
         }
       : null,
     content: isDeleted ? 'This message was deleted' : msg.content,
@@ -71,7 +88,10 @@ export function serializeMessage(msg: IMessage, viewerContext?: ViewerRelationsh
           id: replyObj._id.toString(),
           content: replyObj.deletedAt ? 'This message was deleted' : replyObj.content,
           messageType: replyObj.messageType,
-          senderName: replyObj.senderId?.fullName || 'User',
+          senderName:
+            replyObj.senderType === 'ai'
+              ? BLINK_AI_DISPLAY_NAME
+              : replyObj.senderId?.fullName || 'User',
         }
       : null,
     forwardedFrom: isDeleted ? null : msg.forwardedFrom,
@@ -87,6 +107,13 @@ export function serializeMessage(msg: IMessage, viewerContext?: ViewerRelationsh
             timestamp: msg.callEvent.timestamp || msg.createdAt,
           }
         : null,
+    aiMeta:
+      isAi && msg.aiMeta
+        ? {
+            status: msg.aiMeta.status,
+            isError: msg.aiMeta.status === 'failed',
+          }
+        : undefined,
     reactions: isDeleted
       ? []
       : msg.reactions.map((r) => ({
@@ -198,7 +225,7 @@ export async function createAndDispatchMessage(params: {
       .populate('senderId', PUBLIC_USER_SELECT)
       .populate({
         path: 'replyTo',
-        select: 'content messageType deletedAt senderId',
+        select: 'content messageType senderType deletedAt senderId',
         populate: { path: 'senderId', select: 'fullName username' },
       });
 
@@ -248,7 +275,7 @@ export async function createAndDispatchMessage(params: {
         .populate('senderId', PUBLIC_USER_SELECT)
         .populate({
           path: 'replyTo',
-          select: 'content messageType deletedAt senderId',
+          select: 'content messageType senderType deletedAt senderId',
           populate: { path: 'senderId', select: 'fullName username' },
         });
       if (existing) {
@@ -300,7 +327,7 @@ export async function createAndDispatchMessage(params: {
     .populate('senderId', PUBLIC_USER_SELECT)
     .populate({
       path: 'replyTo',
-      select: 'content messageType deletedAt senderId',
+      select: 'content messageType senderType deletedAt senderId',
       populate: { path: 'senderId', select: 'fullName username' },
     });
 
@@ -409,6 +436,18 @@ export async function createAndDispatchMessage(params: {
       participantMuteMap,
     }).catch((err) => {
       console.error('[Push] Failed to dispatch message push notifications:', err);
+    });
+  }
+
+  if (parsed.messageType === 'text' && hasText) {
+    void maybeTriggerBlinkReply({
+      conversation: conv,
+      triggerMessage: msg,
+      triggerUserId: userId,
+      triggerUserName: senderFullName || serialized.sender?.fullName,
+      io,
+    }).catch((err) => {
+      console.error('[BlinkAI] Unexpected async trigger failure:', err);
     });
   }
 

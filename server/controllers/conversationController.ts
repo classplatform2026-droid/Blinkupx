@@ -16,6 +16,7 @@ import { getIO } from '../sockets/index.ts';
 import { AppError } from '../utils/errors.ts';
 import { extractUrlsFromText } from '../utils/linkPreview.ts';
 import { resolveUserSettings } from '../utils/serializers.ts';
+import { BLINK_AI_SERIALIZED_SENDER } from '../services/ai/blinkIdentity.ts';
 import { createConversationSchema } from '../validators/schemas.ts';
 
 async function formatConversation(
@@ -85,7 +86,7 @@ async function formatConversation(
         id: pm._id.toString(),
         content: pm.content,
         messageType: pm.messageType,
-        sender: pm.senderId,
+        sender: pm.senderType === 'ai' ? BLINK_AI_SERIALIZED_SENDER : pm.senderId,
       };
     }
   }

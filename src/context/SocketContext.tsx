@@ -36,11 +36,19 @@ export interface PresenceEntry {
   onlineHidden?: boolean;
 }
 
+export interface AiChatStatusEntry {
+  status: 'thinking' | 'failed';
+  message?: string;
+  requestId?: string;
+  updatedAt: number;
+}
+
 interface SocketContextValue {
   socket: Socket | null;
   connected: boolean;
   presenceMap: Record<string, PresenceEntry>;
   typingMap: Record<string, Array<{ userId: string; username: string }>>;
+  aiStatusMap: Record<string, AiChatStatusEntry>;
 }
 
 const SocketContext = createContext<SocketContextValue>({
@@ -48,6 +56,7 @@ const SocketContext = createContext<SocketContextValue>({
   connected: false,
   presenceMap: {},
   typingMap: {},
+  aiStatusMap: {},
 });
 
 function parseFocusedRoute(pathname: string): {
@@ -84,7 +93,9 @@ export function SocketProvider({ children }: { children: React.ReactNode }) {
   const [typingMap, setTypingMap] = useState<
     Record<string, Array<{ userId: string; username: string }>>
   >({});
+  const [aiStatusMap, setAiStatusMap] = useState<Record<string, AiChatStatusEntry>>({});
   const typingTimeoutsRef = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
+  const aiStatusTimeoutsRef = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
   const ackedDeliveredIdsRef = useRef<Set<string>>(new Set());
   const userRef = useRef(user);
   const pathnameRef = useRef(location.pathname);
@@ -202,6 +213,7 @@ export function SocketProvider({ children }: { children: React.ReactNode }) {
       });
       setConnected(false);
       setPresenceMap({});
+      setAiStatusMap({});
       ackedDeliveredIdsRef.current.clear();
       return;
     }
@@ -235,6 +247,19 @@ export function SocketProvider({ children }: { children: React.ReactNode }) {
       });
     };
 
+    const clearAiStatusForConv = (convId: string) => {
+      if (aiStatusTimeoutsRef.current[convId]) {
+        clearTimeout(aiStatusTimeoutsRef.current[convId]);
+        delete aiStatusTimeoutsRef.current[convId];
+      }
+      setAiStatusMap((prev) => {
+        if (!prev[convId]) return prev;
+        const next = { ...prev };
+        delete next[convId];
+        return next;
+      });
+    };
+
     s.on('connect', () => {
       setConnected(true);
       s.emit('message:sync_delivered');
@@ -243,6 +268,9 @@ export function SocketProvider({ children }: { children: React.ReactNode }) {
     });
 
     s.on('message:new', (msg: Message) => {
+      if (msg.senderType === 'ai' || msg.sender?.isAi) {
+        clearAiStatusForConv(msg.conversationId);
+      }
       acknowledgeDelivered(msg);
       syncIncomingMessageCaches(currentUserId, msg);
       invalidateConversationQueries(currentUserId);
@@ -401,6 +429,45 @@ export function SocketProvider({ children }: { children: React.ReactNode }) {
     });
 
     s.on(
+      'ai:status',
+      (payload: {
+        conversationId?: string;
+        requestId?: string;
+        status?: 'thinking' | 'completed' | 'failed';
+        message?: string;
+      }) => {
+        const convId = payload?.conversationId;
+        if (!convId || !payload?.status) return;
+
+        if (payload.status === 'completed') {
+          clearAiStatusForConv(convId);
+          return;
+        }
+
+        if (aiStatusTimeoutsRef.current[convId]) {
+          clearTimeout(aiStatusTimeoutsRef.current[convId]);
+        }
+
+        const entry: AiChatStatusEntry = {
+          status: payload.status === 'failed' ? 'failed' : 'thinking',
+          message: payload.message,
+          requestId: payload.requestId,
+          updatedAt: Date.now(),
+        };
+
+        setAiStatusMap((prev) => ({
+          ...prev,
+          [convId]: entry,
+        }));
+
+        const autoExpireMs = payload.status === 'failed' ? 8_000 : 35_000;
+        aiStatusTimeoutsRef.current[convId] = setTimeout(() => {
+          clearAiStatusForConv(convId);
+        }, autoExpireMs);
+      }
+    );
+
+    s.on(
       'notification:message',
       (payload: {
         id: string;
@@ -530,6 +597,8 @@ export function SocketProvider({ children }: { children: React.ReactNode }) {
     return () => {
       Object.values(typingTimeoutsRef.current).forEach(clearTimeout);
       typingTimeoutsRef.current = {};
+      Object.values(aiStatusTimeoutsRef.current).forEach(clearTimeout);
+      aiStatusTimeoutsRef.current = {};
       socketRef.current = null;
       s.disconnect();
       setSocket(null);
@@ -538,7 +607,9 @@ export function SocketProvider({ children }: { children: React.ReactNode }) {
   }, [user?.id, showToast, refreshUser, navigate, emitFocusState]);
 
   return (
-    <SocketContext.Provider value={{ socket, connected, presenceMap, typingMap }}>
+    <SocketContext.Provider
+      value={{ socket, connected, presenceMap, typingMap, aiStatusMap }}
+    >
       {children}
     </SocketContext.Provider>
   );

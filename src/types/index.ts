@@ -74,6 +74,7 @@ export interface ServiceStatus {
   cloudinary: boolean;
   webPush?: boolean;
   livekit?: boolean;
+  blinkAi?: boolean;
   otpProvider: boolean;
   otpProviderType: string;
   missingOtpVars: string[];
@@ -185,12 +186,14 @@ export interface Message {
   id: string;
   conversationId: string;
   senderId: string;
+  senderType?: 'user' | 'ai';
   clientMessageId?: string | null;
   sender: {
     id: string;
     fullName: string;
     username: string;
     avatar: string;
+    isAi?: boolean;
   } | null;
   content: string;
   messageType: 'text' | 'image' | 'video' | 'document' | 'voice' | 'system' | 'call_event';
@@ -207,6 +210,10 @@ export interface Message {
     senderName: string;
   } | null;
   callEvent?: MessageCallEvent | null;
+  aiMeta?: {
+    status?: 'completed' | 'failed';
+    isError?: boolean;
+  };
   reactions: MessageReaction[];
   editedAt: string | null;
   deletedAt: string | null;

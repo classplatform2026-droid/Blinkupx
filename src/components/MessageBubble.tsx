@@ -21,6 +21,7 @@ import {
   Reply,
   RotateCcw,
   SmilePlus,
+  Sparkles,
   Trash2,
   Video,
   VideoOff,
@@ -331,6 +332,9 @@ export function MessageBubble({
     );
   }
 
+  const isAiMessage =
+    message.senderType === 'ai' || Boolean(message.sender?.isAi);
+  const effectiveIsOwn = isOwn && !isAiMessage;
   const isDeleted = Boolean(message.deletedAt);
   const isSending = message.deliveryStatus === 'sending';
   const isFailed = message.deliveryStatus === 'failed';
@@ -511,7 +515,8 @@ export function MessageBubble({
     : [];
 
   const canEditMessageOrCaption =
-    isOwn &&
+    effectiveIsOwn &&
+    !isAiMessage &&
     ['text', 'image', 'video', 'document'].includes(message.messageType);
 
   const triggerMediaPreview = (originalIndex: number, resolvedUrl: string) => {
@@ -618,23 +623,32 @@ export function MessageBubble({
       id={`msg-${message.id}`}
       className={`group flex gap-2.5 px-3 sm:px-5 w-full min-w-0 max-w-full overflow-x-hidden ${
         compact ? 'py-0.5' : 'py-1.5'
-      } ${isOwn ? 'justify-end' : 'justify-start'} ${
+      } ${effectiveIsOwn ? 'justify-end' : 'justify-start'} ${
         highlighted ? 'bg-[#242424]/70 rounded-xl transition-colors duration-500' : ''
       }`}
     >
-      {!isOwn && isGroup && (
+      {!effectiveIsOwn && (isGroup || isAiMessage) && (
         <div className="pt-1 shrink-0">
-          <UserAvatar
-            src={message.sender?.avatar}
-            name={message.sender?.fullName || 'User'}
-            size="sm"
-          />
+          {isAiMessage ? (
+            <div
+              aria-label="Blink AI"
+              className="w-8 h-8 rounded-full bg-[#242730] border border-[#3E4554] flex items-center justify-center text-[#FFFFFF]"
+            >
+              <Sparkles className="w-4 h-4 text-[#A3E635]" />
+            </div>
+          ) : (
+            <UserAvatar
+              src={message.sender?.avatar}
+              name={message.sender?.fullName || 'User'}
+              size="sm"
+            />
+          )}
         </div>
       )}
 
       <div
         className={`relative min-w-0 max-w-[82%] sm:max-w-[68%] flex flex-col touch-pan-y ${
-          isOwn ? 'items-end' : 'items-start'
+          effectiveIsOwn ? 'items-end' : 'items-start'
         }`}
         onPointerDown={handlePointerDown}
         onPointerMove={handlePointerMove}
@@ -654,20 +668,31 @@ export function MessageBubble({
           setReactOpen(false);
         }}
       >
-        {!isOwn && isGroup && message.sender && (
-          <div className="flex items-center gap-2 mb-1 px-1 max-w-full min-w-0">
+        {!effectiveIsOwn && (isGroup || isAiMessage) && (message.sender || isAiMessage) && (
+          <div className="flex items-center gap-1.5 mb-1 px-1 max-w-full min-w-0">
             <span className="text-xs font-medium text-[#FFFFFF] truncate">
-              {message.sender.fullName}
+              {isAiMessage ? 'Blink' : message.sender?.fullName}
             </span>
-            {roleLabel && (
+            {isAiMessage ? (
               <>
                 <span className="text-[#999999] text-xs shrink-0" aria-hidden="true">
                   ·
                 </span>
-                <span className="text-[11px] font-medium text-[#999999] shrink-0">
-                  {roleLabel}
+                <span className="text-[11px] font-medium text-[#A3E635] shrink-0">
+                  AI
                 </span>
               </>
+            ) : (
+              roleLabel && (
+                <>
+                  <span className="text-[#999999] text-xs shrink-0" aria-hidden="true">
+                    ·
+                  </span>
+                  <span className="text-[11px] font-medium text-[#999999] shrink-0">
+                    {roleLabel}
+                  </span>
+                </>
+              )
             )}
           </div>
         )}
@@ -703,7 +728,7 @@ export function MessageBubble({
                 : 'transform 180ms cubic-bezier(0.22, 1, 0.36, 1)',
             }}
           >
-            {isOwn && !isDeleted && !isPendingOrFailed && (
+            {effectiveIsOwn && !isDeleted && !isPendingOrFailed && (
               <div className="opacity-0 group-hover:opacity-100 focus-within:opacity-100 transition-opacity flex items-center gap-0.5 pb-1 shrink-0">
                 <button
                   type="button"
@@ -734,19 +759,21 @@ export function MessageBubble({
               className={`min-w-0 max-w-full overflow-hidden rounded-2xl px-3.5 py-2.5 text-sm leading-relaxed break-words [overflow-wrap:anywhere] transition-opacity ${
                 isDeleted
                   ? 'bg-[#202020] border border-[#303030] text-[#999999] italic'
-                  : isOwn
+                  : effectiveIsOwn
                     ? isFailed
                       ? 'bg-[#FFFFFF] text-[#181818] ring-1 ring-[#E5484D]'
                       : isSending
                         ? 'bg-[#FFFFFF]/95 text-[#181818]'
                         : 'bg-[#FFFFFF] text-[#181818]'
-                    : 'bg-[#242424] text-[#FFFFFF] border border-[#303030]'
+                    : isAiMessage
+                      ? 'bg-[#21242B] text-[#FFFFFF] border border-[#3A404D]'
+                      : 'bg-[#242424] text-[#FFFFFF] border border-[#303030]'
               }`}
             >
               {!isDeleted && message.forwardedFrom && (
                 <div
                   className={`flex items-center gap-1.5 text-[11px] mb-1 min-w-0 ${
-                    isOwn ? 'text-[#555555]' : 'text-[#999999]'
+                    effectiveIsOwn ? 'text-[#555555]' : 'text-[#999999]'
                   }`}
                 >
                   <Forward className="w-3 h-3 shrink-0" />
@@ -759,7 +786,7 @@ export function MessageBubble({
               {!isDeleted && message.replyTo && (
                 <div
                   className={`mb-2 min-w-0 max-w-full overflow-hidden rounded-lg px-2.5 py-1.5 text-xs ${
-                    isOwn
+                    effectiveIsOwn
                       ? 'bg-[#181818]/10 text-[#181818]'
                       : 'bg-[#181818] text-[#999999] border border-[#303030]'
                   }`}
@@ -951,7 +978,9 @@ export function MessageBubble({
 
             {message.content && (
               <p className="whitespace-pre-wrap break-words [overflow-wrap:anywhere]">
-                {isDeleted ? message.content : renderMessageText(message.content, isOwn)}
+                {isDeleted
+                  ? message.content
+                  : renderMessageText(message.content, effectiveIsOwn)}
               </p>
             )}
 
@@ -959,19 +988,19 @@ export function MessageBubble({
               className={`flex items-center justify-end gap-1.5 mt-1 text-[10px] font-mono tabular-nums ${
                 isDeleted
                   ? 'text-[#999999]'
-                  : isOwn
+                  : effectiveIsOwn
                     ? 'text-[#555555]'
                     : 'text-[#999999]'
               }`}
             >
               {message.editedAt && !isDeleted && <span>edited</span>}
-              {isOwn && !isDeleted && message.deliveryStatus === 'sending' && message.localQueued && (
+              {effectiveIsOwn && !isDeleted && message.deliveryStatus === 'sending' && message.localQueued && (
                 <span className="text-[10px] font-sans text-[#777777]">
                   Waiting for connection ·
                 </span>
               )}
               <span>{formatTime(message.createdAt)}</span>
-              {isOwn && !isDeleted && (
+              {effectiveIsOwn && !isDeleted && (
                 <span
                   aria-label={
                     message.deliveryStatus === 'sending' && message.localQueued
@@ -1009,7 +1038,7 @@ export function MessageBubble({
             </div>
           </div>
 
-          {!isOwn && !isDeleted && !isPendingOrFailed && (
+          {!effectiveIsOwn && !isDeleted && !isPendingOrFailed && (
             <div className="opacity-0 group-hover:opacity-100 focus-within:opacity-100 transition-opacity flex items-center gap-0.5 pb-1 shrink-0">
               <button
                 type="button"
@@ -1038,7 +1067,7 @@ export function MessageBubble({
           </div>
         </div>
 
-        {isOwn && isFailed && !isDeleted && (
+        {effectiveIsOwn && isFailed && !isDeleted && (
           <div className="flex items-center gap-2.5 mt-1 px-1 text-xs">
             <span className="text-[#E5484D]">
               {message.localError || 'Not sent'}
@@ -1084,7 +1113,7 @@ export function MessageBubble({
         )}
 
         {reactOpen && !isDeleted && (
-          <div className={`mt-1.5 z-30 ${isOwn ? 'self-end' : 'self-start'}`}>
+          <div className={`mt-1.5 z-30 ${effectiveIsOwn ? 'self-end' : 'self-start'}`}>
             <EmojiPicker
               compact
               onSelect={(emoji) => {
@@ -1102,7 +1131,7 @@ export function MessageBubble({
           >
             <div
               className={`absolute mt-1 w-48 rounded-xl bg-[#242424] border border-[#303030] py-1.5 shadow-2xl ${
-                isOwn ? 'right-6' : 'left-6'
+                effectiveIsOwn ? 'right-6' : 'left-6'
               }`}
               style={{ top: '42%' }}
               onClick={(e) => e.stopPropagation()}
@@ -1185,7 +1214,7 @@ export function MessageBubble({
                   )}
                 </>
               )}
-              {(isOwn || canModerate) && !isDeleted && (
+              {(effectiveIsOwn || canModerate) && !isDeleted && (
                 <button
                   type="button"
                   onClick={() => {

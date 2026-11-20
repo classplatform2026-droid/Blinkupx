@@ -81,7 +81,7 @@ export async function listMessages(req: AuthenticatedRequest, res: Response) {
     .populate('senderId', PUBLIC_USER_SELECT)
     .populate({
       path: 'replyTo',
-      select: 'content messageType deletedAt senderId',
+      select: 'content messageType senderType deletedAt senderId',
       populate: { path: 'senderId', select: 'fullName username' },
     });
 
@@ -139,6 +139,9 @@ export async function editMessage(req: AuthenticatedRequest, res: Response) {
   if (!msg) {
     throw new AppError('Message not found.', 404, 'MESSAGE_NOT_FOUND');
   }
+  if (msg.senderType === 'ai') {
+    throw new AppError('AI messages cannot be edited.', 403, 'FORBIDDEN');
+  }
   if (msg.senderId.toString() !== userId) {
     throw new AppError('You can only edit your own messages.', 403, 'FORBIDDEN');
   }
@@ -188,7 +191,7 @@ export async function editMessage(req: AuthenticatedRequest, res: Response) {
     .populate('senderId', 'fullName username avatar')
     .populate({
       path: 'replyTo',
-      select: 'content messageType deletedAt senderId',
+      select: 'content messageType senderType deletedAt senderId',
       populate: { path: 'senderId', select: 'fullName username' },
     });
 
@@ -228,7 +231,9 @@ export async function deleteMessage(req: AuthenticatedRequest, res: Response) {
     });
   }
 
-  let canModerate = msg.senderId.toString() === userId;
+  let canModerate =
+    msg.senderId.toString() === userId ||
+    (msg.senderType === 'ai' && msg.aiMeta?.triggerUserId?.toString() === userId);
   if (!canModerate && conv.communityId) {
     const community = await Community.findById(conv.communityId).select('members');
     const member = community?.members.find((m) => m.userId.toString() === userId);
@@ -384,7 +389,7 @@ export async function getMessagesAround(req: AuthenticatedRequest, res: Response
       .populate('senderId', PUBLIC_USER_SELECT)
       .populate({
         path: 'replyTo',
-        select: 'content messageType deletedAt senderId',
+        select: 'content messageType senderType deletedAt senderId',
         populate: { path: 'senderId', select: 'fullName username' },
       }),
     Message.find({
@@ -399,7 +404,7 @@ export async function getMessagesAround(req: AuthenticatedRequest, res: Response
       .populate('senderId', PUBLIC_USER_SELECT)
       .populate({
         path: 'replyTo',
-        select: 'content messageType deletedAt senderId',
+        select: 'content messageType senderType deletedAt senderId',
         populate: { path: 'senderId', select: 'fullName username' },
       }),
   ]);
