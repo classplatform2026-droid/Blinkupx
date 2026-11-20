@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { Clock, MessageSquare, Search, Trash2, Users, User as UserIcon } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 import { AppHeader } from '../../components/AppHeader';
+import { FormattedMessagePreview } from '../../components/FormattedMessageText';
 import { EmptyState, ErrorState, LoadingState } from '../../components/States';
 import { UserAvatar } from '../../components/UserAvatar';
 import { useAuth } from '../../context/AuthContext';
@@ -203,7 +204,9 @@ export function MessageSearchPage() {
                             {formatConversationTime(m.createdAt)}
                           </span>
                         </div>
-                        <p className="text-sm text-[#999999] line-clamp-2">{m.content}</p>
+                        <p className="text-sm text-[#999999] line-clamp-2">
+                          <FormattedMessagePreview text={m.content} variant="muted" />
+                        </p>
                       </button>
                     ))}
                   </div>

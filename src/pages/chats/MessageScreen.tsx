@@ -19,6 +19,7 @@ import {
 } from 'lucide-react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { DropdownMenu } from '../../components/DropdownMenu';
+import { FormattedMessagePreview } from '../../components/FormattedMessageText';
 import { MediaGalleryModal } from '../../components/MediaGalleryModal';
 import { MessageBubble } from '../../components/MessageBubble';
 import { MessageInput, type OutgoingMessagePayload } from '../../components/MessageInput';
@@ -908,7 +909,14 @@ export function MessageScreen({ conversationId }: { conversationId: string }) {
             <div className="min-w-0">
               <p className="text-[11px] font-medium text-[#999999]">Pinned message</p>
               <p className="text-xs text-[#FFFFFF] truncate">
-                {conversation.pinnedMessage.content || conversation.pinnedMessage.messageType}
+                {conversation.pinnedMessage.content ? (
+                  <FormattedMessagePreview
+                    text={conversation.pinnedMessage.content}
+                    variant="incoming"
+                  />
+                ) : (
+                  conversation.pinnedMessage.messageType
+                )}
               </p>
             </div>
           </div>

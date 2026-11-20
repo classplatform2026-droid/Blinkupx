@@ -4,6 +4,7 @@ import { useToast } from '../context/ToastContext';
 import { extractApiError, mediaApi } from '../services/api';
 import type { Message } from '../types';
 import { formatFileSize } from '../utils/formatters';
+import { FormattedMessageText } from './FormattedMessageText';
 import { Modal } from './Modal';
 import { PrimaryButton } from './PrimaryButton';
 
@@ -185,14 +186,18 @@ export function MediaGalleryModal({
         {(att.caption || message.content) && (
           <div className="space-y-1.5 rounded-xl bg-[#242424] border border-[#303030] px-3.5 py-2.5">
             {displayCaption && (
-              <p className="text-sm text-[#FFFFFF] whitespace-pre-wrap">
-                {displayCaption}
-              </p>
+              <FormattedMessageText
+                text={displayCaption}
+                variant="incoming"
+                className="text-sm text-[#FFFFFF]"
+              />
             )}
             {att.caption && message.content && att.caption !== message.content && (
-              <p className="text-xs text-[#999999] whitespace-pre-wrap">
-                {message.content}
-              </p>
+              <FormattedMessageText
+                text={message.content}
+                variant="incoming"
+                className="text-xs text-[#999999]"
+              />
             )}
           </div>
         )}

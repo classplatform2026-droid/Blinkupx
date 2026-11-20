@@ -28,6 +28,7 @@ import {
 } from '../utils/voiceRecorder';
 import { AttachmentMenu } from './AttachmentMenu';
 import { EmojiPicker } from './EmojiPicker';
+import { FormattedMessagePreview } from './FormattedMessageText';
 import { MediaComposerStrip } from './MediaComposerStrip';
 import { VoiceMessagePlayer } from './VoiceMessagePlayer';
 
@@ -519,16 +520,19 @@ export function MessageInput({
                   : `Replying to ${replyingTo?.sender?.fullName || 'User'}`}
               </p>
               <p className="text-xs text-[#999999] truncate">
-                {editingMessage?.content ||
-                  (editingMessage && editingMessage.attachments.length > 0
-                    ? `${editingMessage.attachments.length} ${
-                        editingMessage.attachments.length === 1 ? 'attachment' : 'attachments'
-                      }`
-                    : '') ||
-                  replyingTo?.content ||
-                  (replyingTo?.attachments?.[0]?.fileName
-                    ? truncateMiddleFileName(replyingTo.attachments[0].fileName, 44)
-                    : replyingTo?.messageType)}
+                {editingMessage?.content ? (
+                  <FormattedMessagePreview text={editingMessage.content} variant="muted" />
+                ) : editingMessage && editingMessage.attachments.length > 0 ? (
+                  `${editingMessage.attachments.length} ${
+                    editingMessage.attachments.length === 1 ? 'attachment' : 'attachments'
+                  }`
+                ) : replyingTo?.content ? (
+                  <FormattedMessagePreview text={replyingTo.content} variant="muted" />
+                ) : replyingTo?.attachments?.[0]?.fileName ? (
+                  truncateMiddleFileName(replyingTo.attachments[0].fileName, 44)
+                ) : (
+                  replyingTo?.messageType
+                )}
               </p>
             </div>
             <button

@@ -13,6 +13,7 @@ import { useAuth } from '../context/AuthContext';
 import type { Conversation } from '../types';
 import { formatConversationTime } from '../utils/formatters';
 import { DropdownMenu } from './DropdownMenu';
+import { FormattedMessagePreview } from './FormattedMessageText';
 import { UserAvatar } from './UserAvatar';
 
 interface ChatListItemProps {
@@ -166,7 +167,13 @@ export function ChatListItem({
                       )}
                     </span>
                   )}
-                  <span className="truncate">{previewString}</span>
+                  <span className="truncate">
+                    {!typingText && !isCallEvent && rawContent ? (
+                      <FormattedMessagePreview text={rawContent} variant="muted" />
+                    ) : (
+                      previewString
+                    )}
+                  </span>
                 </p>
               );
             })()}

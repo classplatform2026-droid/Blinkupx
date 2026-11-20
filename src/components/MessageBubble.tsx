@@ -41,40 +41,14 @@ import {
 } from '../utils/swipeGesture';
 import { EmojiPicker } from './EmojiPicker';
 import { FileNameDisplay } from './FileNameDisplay';
+import {
+  FormattedMessagePreview,
+  FormattedMessageText,
+} from './FormattedMessageText';
 import { Modal } from './Modal';
 import { PrimaryButton } from './PrimaryButton';
 import { UserAvatar } from './UserAvatar';
 import { VoiceMessagePlayer } from './VoiceMessagePlayer';
-
-function renderMessageText(text: string, isOwn: boolean) {
-  const regex = /((?:https?:\/\/|www\.)[^\s<>"'`)\]]+)/gi;
-  const parts = text.split(regex);
-  return parts.map((part, idx) => {
-    if (!part) return null;
-    if (/^(?:https?:\/\/|www\.)/i.test(part)) {
-      const cleanUrl = part.replace(/[.,!?;:'")\]}>]+$/, '');
-      const trailing = part.slice(cleanUrl.length);
-      const href = /^https?:\/\//i.test(cleanUrl) ? cleanUrl : `https://${cleanUrl}`;
-      return (
-        <React.Fragment key={idx}>
-          <a
-            href={href}
-            target="_blank"
-            rel="noopener noreferrer"
-            onClick={(e) => e.stopPropagation()}
-            className={`underline underline-offset-2 break-all ${
-              isOwn ? 'text-[#181818] hover:opacity-80' : 'text-[#FFFFFF] hover:opacity-80'
-            }`}
-          >
-            {cleanUrl}
-          </a>
-          {trailing}
-        </React.Fragment>
-      );
-    }
-    return <React.Fragment key={idx}>{part}</React.Fragment>;
-  });
-}
 
 function UploadProgressOverlay({
   progressItem,
@@ -793,7 +767,14 @@ export function MessageBubble({
                 >
                   <p className="font-semibold truncate">{message.replyTo.senderName}</p>
                   <p className="truncate opacity-80">
-                    {message.replyTo.content || message.replyTo.messageType}
+                    {message.replyTo.content ? (
+                      <FormattedMessagePreview
+                        text={message.replyTo.content}
+                        variant={effectiveIsOwn ? 'outgoing' : 'muted'}
+                      />
+                    ) : (
+                      message.replyTo.messageType
+                    )}
                   </p>
                 </div>
               )}
@@ -803,9 +784,11 @@ export function MessageBubble({
                 <div className="mb-1.5 space-y-1 min-w-0 max-w-full">
                   {renderVisualTile(visualMedia[0].att, visualMedia[0].index)}
                   {visualMedia[0].att.caption && (
-                    <p className="text-xs whitespace-pre-wrap break-words [overflow-wrap:anywhere] opacity-90">
-                      {visualMedia[0].att.caption}
-                    </p>
+                    <FormattedMessageText
+                      text={visualMedia[0].att.caption}
+                      variant={effectiveIsOwn ? 'outgoing' : 'incoming'}
+                      className="text-xs opacity-90"
+                    />
                   )}
                 </div>
               )}
@@ -851,7 +834,7 @@ export function MessageBubble({
               visualMedia.some(({ att }) => Boolean(att.caption?.trim())) && (
                 <div
                   className={`mb-1.5 space-y-0.5 text-xs ${
-                    isOwn ? 'text-[#333333]' : 'text-[#CCCCCC]'
+                    effectiveIsOwn ? 'text-[#333333]' : 'text-[#CCCCCC]'
                   }`}
                 >
                   {visualMedia.map(({ att }, pos) =>
@@ -860,7 +843,10 @@ export function MessageBubble({
                         <span className="font-mono text-[10px] opacity-70 mr-1.5">
                           #{pos + 1}
                         </span>
-                        {att.caption}
+                        <FormattedMessagePreview
+                          text={att.caption}
+                          variant={effectiveIsOwn ? 'outgoing' : 'muted'}
+                        />
                       </p>
                     ) : null
                   )}
@@ -968,21 +954,27 @@ export function MessageBubble({
                     </div>
                   </div>
                   {att.caption && (
-                    <p className="text-xs mt-1 whitespace-pre-wrap break-words [overflow-wrap:anywhere] opacity-90">
-                      {att.caption}
-                    </p>
+                    <FormattedMessageText
+                      text={att.caption}
+                      variant={effectiveIsOwn ? 'outgoing' : 'incoming'}
+                      className="text-xs mt-1 opacity-90"
+                    />
                   )}
                 </div>
               );
             })}
 
-            {message.content && (
-              <p className="whitespace-pre-wrap break-words [overflow-wrap:anywhere]">
-                {isDeleted
-                  ? message.content
-                  : renderMessageText(message.content, effectiveIsOwn)}
-              </p>
-            )}
+            {message.content &&
+              (isDeleted ? (
+                <p className="whitespace-pre-wrap break-words [overflow-wrap:anywhere]">
+                  {message.content}
+                </p>
+              ) : (
+                <FormattedMessageText
+                  text={message.content}
+                  variant={effectiveIsOwn ? 'outgoing' : 'incoming'}
+                />
+              ))}
 
             <div
               className={`flex items-center justify-end gap-1.5 mt-1 text-[10px] font-mono tabular-nums ${
@@ -1271,9 +1263,11 @@ export function MessageBubble({
             {fileDetailModal.att.caption && (
               <div className="rounded-xl bg-[#181818] border border-[#303030] p-3">
                 <p className="text-[11px] text-[#999999] mb-1">Caption</p>
-                <p className="text-xs text-[#FFFFFF] whitespace-pre-wrap break-words [overflow-wrap:anywhere]">
-                  {fileDetailModal.att.caption}
-                </p>
+                <FormattedMessageText
+                  text={fileDetailModal.att.caption}
+                  variant="incoming"
+                  className="text-xs text-[#FFFFFF]"
+                />
               </div>
             )}
 
