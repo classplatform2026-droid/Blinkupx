@@ -30,6 +30,10 @@ import { AttachmentMenu } from './AttachmentMenu';
 import { EmojiPicker } from './EmojiPicker';
 import { FormattedMessagePreview } from './FormattedMessageText';
 import { MediaComposerStrip } from './MediaComposerStrip';
+import {
+  RichTextComposer,
+  type RichTextComposerHandle,
+} from './RichTextComposer';
 import { VoiceMessagePlayer } from './VoiceMessagePlayer';
 
 export type { OutgoingMessagePayload };
@@ -102,7 +106,7 @@ export function MessageInput({
   const typingTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const replaceInputRef = useRef<HTMLInputElement>(null);
-  const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const composerRef = useRef<RichTextComposerHandle>(null);
   const [pendingUploadType, setPendingUploadType] = useState<
     'image' | 'video' | 'document'
   >('image');
@@ -123,7 +127,7 @@ export function MessageInput({
       } else {
         setEditingCaptions({});
       }
-      textareaRef.current?.focus();
+      composerRef.current?.focus();
     } else {
       setEditingCaptions({});
     }
@@ -131,7 +135,7 @@ export function MessageInput({
 
   useEffect(() => {
     if (replyingTo) {
-      textareaRef.current?.focus();
+      composerRef.current?.focus();
     }
   }, [replyingTo]);
 
@@ -366,11 +370,9 @@ export function MessageInput({
     addFilesToStage(fileList, pendingUploadType);
   };
 
-  const handlePaste = (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
-    const clipboardFiles = Array.from(e.clipboardData?.files || []);
-    if (clipboardFiles.length === 0) return;
-    e.preventDefault();
-    addFilesToStage(clipboardFiles, 'image');
+  const handlePastedFiles = (files: File[]) => {
+    if (files.length === 0) return;
+    addFilesToStage(files, 'image');
   };
 
   const handleDrop = (e: React.DragEvent<HTMLDivElement>) => {
@@ -745,7 +747,7 @@ export function MessageInput({
             <div className="absolute bottom-14 left-10 z-30">
               <EmojiPicker
                 onSelect={(emoji) => {
-                  setText((prev) => prev + emoji);
+                  composerRef.current?.insertText(emoji);
                   setShowEmoji(false);
                 }}
               />
@@ -778,18 +780,13 @@ export function MessageInput({
             <Smile className="w-5 h-5" />
           </button>
 
-          <textarea
-            ref={textareaRef}
-            rows={1}
+          <RichTextComposer
+            ref={composerRef}
             value={text}
-            onChange={(e) => handleTextChange(e.target.value)}
-            onPaste={handlePaste}
-            onKeyDown={(e) => {
-              if (enterToSend && e.key === 'Enter' && !e.shiftKey) {
-                e.preventDefault();
-                handleSubmit();
-              }
-            }}
+            onChange={handleTextChange}
+            onSubmit={() => void handleSubmit()}
+            onPasteFiles={handlePastedFiles}
+            enterToSend={enterToSend}
             placeholder={
               editingMessage
                 ? editingMessage.messageType === 'text'
@@ -799,7 +796,6 @@ export function MessageInput({
                   ? 'Add a caption...'
                   : 'Write a message...'
             }
-            className="flex-1 min-w-0 min-h-[44px] max-h-32 resize-none rounded-xl bg-[#242424] border border-[#303030] px-4 py-2.5 text-sm text-[#FFFFFF] placeholder:text-[#999999] focus:border-[#FFFFFF]/40 focus:outline-none"
           />
 
           {canSubmit ? (
