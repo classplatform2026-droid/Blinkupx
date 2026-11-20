@@ -174,6 +174,9 @@ async function persistAndDispatchAiMessage(params: {
     messageType: 'text',
     createdAt: aiMsg.createdAt,
   };
+  for (const part of conversation.participants) {
+    part.deletedAt = null;
+  }
   await conversation.save();
 
   const populated = await Message.findById(aiMsg._id)
@@ -483,7 +486,7 @@ export async function maybeTriggerBlinkReply(params: {
       speakerName = speakerDoc?.fullName || speakerDoc?.username || 'User';
     }
 
-    const { contextTurns, replyTarget } = await collectChatContext({
+    const { contextTurns, replyTarget, conversationMeta } = await collectChatContext({
       conversationId: chatId,
       triggerMessageId,
       triggerCreatedAt: triggerMessage.createdAt,
@@ -496,6 +499,7 @@ export async function maybeTriggerBlinkReply(params: {
       query: mention.query,
       contextTurns,
       replyTarget,
+      conversationMeta,
     });
 
     const execOutcome = await runWithFailover({
