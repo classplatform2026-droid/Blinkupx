@@ -1,4 +1,6 @@
 import React, { useMemo, useState } from 'react';
+import { useNavigate } from 'react-router-dom';
+import type { MessageMention } from '../types';
 import {
   buildPreviewTokens,
   parseMessageBlocks,
@@ -8,6 +10,137 @@ import {
 
 export type FormattedBubbleVariant = 'outgoing' | 'incoming';
 export type FormattedPreviewVariant = 'outgoing' | 'incoming' | 'muted';
+
+interface MentionRenderContext {
+  mentions?: MessageMention[];
+  currentUserId?: string;
+  onUserMentionClick: (mention: MessageMention) => void;
+}
+
+function resolveTokenMention(
+  username: string,
+  mentions?: MessageMention[]
+): MessageMention | null {
+  const normalized = username.toLowerCase();
+  if (mentions !== undefined) {
+    const matched = mentions.find(
+      (m) => m.username.toLowerCase() === normalized
+    );
+    return matched || null;
+  }
+  // Legacy fallback for messages stored prior to mention metadata support
+  if (normalized === 'blink') {
+    return {
+      type: 'ai',
+      userId: null,
+      username: 'blink',
+      fullName: 'Blink',
+    };
+  }
+  return null;
+}
+
+function MentionBadge({
+  rawText,
+  resolved,
+  variant,
+  previewMode,
+  previewVariant,
+  currentUserId,
+  onUserMentionClick,
+}: {
+  rawText: string;
+  resolved: MessageMention;
+  variant: FormattedBubbleVariant;
+  previewMode: boolean;
+  previewVariant: FormattedPreviewVariant;
+  currentUserId?: string;
+  onUserMentionClick: (mention: MessageMention) => void;
+}) {
+  const isMe = Boolean(
+    currentUserId && resolved.type === 'user' && resolved.userId === currentUserId
+  );
+
+  if (previewMode) {
+    const cls =
+      resolved.type === 'ai'
+        ? previewVariant === 'outgoing'
+          ? 'font-semibold text-[#166534]'
+          : 'font-semibold text-[#A3E635]'
+        : resolved.type === 'everyone'
+          ? previewVariant === 'outgoing'
+            ? 'font-semibold text-[#B45309]'
+            : 'font-semibold text-[#FCD34D]'
+          : previewVariant === 'outgoing'
+            ? 'font-semibold text-[#1D4ED8]'
+            : 'font-semibold text-[#93C5FD]';
+    return <span className={cls}>{rawText}</span>;
+  }
+
+  if (resolved.type === 'ai') {
+    return (
+      <span
+        className={`inline rounded px-1 py-0.5 font-semibold ${
+          variant === 'outgoing'
+            ? 'bg-[#181818]/10 text-[#166534]'
+            : 'bg-[#A3E635]/15 text-[#A3E635]'
+        }`}
+      >
+        {rawText}
+      </span>
+    );
+  }
+
+  if (resolved.type === 'everyone') {
+    return (
+      <span
+        className={`inline rounded px-1 py-0.5 font-semibold ${
+          variant === 'outgoing'
+            ? 'bg-[#D97706]/15 text-[#B45309]'
+            : 'bg-[#F59E0B]/18 text-[#FCD34D]'
+        }`}
+      >
+        {rawText}
+      </span>
+    );
+  }
+
+  const label = resolved.fullName
+    ? `${resolved.fullName} (@${resolved.username})`
+    : `@${resolved.username}`;
+
+  return (
+    <span
+      role="button"
+      tabIndex={0}
+      data-no-swipe="true"
+      title={`View ${label}'s profile`}
+      aria-label={`Open profile for ${label}`}
+      onClick={(e) => {
+        e.stopPropagation();
+        onUserMentionClick(resolved);
+      }}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault();
+          e.stopPropagation();
+          onUserMentionClick(resolved);
+        }
+      }}
+      className={`inline rounded px-1 py-0.5 font-semibold cursor-pointer transition-colors ${
+        variant === 'outgoing'
+          ? isMe
+            ? 'bg-[#2563EB] text-[#FFFFFF] hover:bg-[#1D4ED8]'
+            : 'bg-[#2563EB]/12 text-[#1D4ED8] hover:bg-[#2563EB]/22'
+          : isMe
+            ? 'bg-[#60A5FA]/30 text-[#FFFFFF] ring-1 ring-[#60A5FA]/60 hover:bg-[#60A5FA]/40'
+            : 'bg-[#60A5FA]/15 text-[#93C5FD] hover:bg-[#60A5FA]/25'
+      }`}
+    >
+      {rawText}
+    </span>
+  );
+}
 
 function SpoilerText({
   variant,
@@ -64,6 +197,7 @@ function SpoilerText({
 function renderInlineTokens(
   tokens: InlineToken[],
   variant: FormattedBubbleVariant,
+  mentionCtx: MentionRenderContext,
   previewMode = false,
   previewVariant: FormattedPreviewVariant = 'muted'
 ): React.ReactNode {
@@ -72,24 +206,61 @@ function renderInlineTokens(
       case 'text':
         return <React.Fragment key={idx}>{token.text}</React.Fragment>;
 
+      case 'mention': {
+        const resolved = resolveTokenMention(token.username, mentionCtx.mentions);
+        if (!resolved) {
+          return <React.Fragment key={idx}>{token.text}</React.Fragment>;
+        }
+        return (
+          <MentionBadge
+            key={idx}
+            rawText={token.text}
+            resolved={resolved}
+            variant={variant}
+            previewMode={previewMode}
+            previewVariant={previewVariant}
+            currentUserId={mentionCtx.currentUserId}
+            onUserMentionClick={mentionCtx.onUserMentionClick}
+          />
+        );
+      }
+
       case 'bold':
         return (
           <strong key={idx} className="font-bold">
-            {renderInlineTokens(token.children, variant, previewMode, previewVariant)}
+            {renderInlineTokens(
+              token.children,
+              variant,
+              mentionCtx,
+              previewMode,
+              previewVariant
+            )}
           </strong>
         );
 
       case 'italic':
         return (
           <em key={idx} className="italic">
-            {renderInlineTokens(token.children, variant, previewMode, previewVariant)}
+            {renderInlineTokens(
+              token.children,
+              variant,
+              mentionCtx,
+              previewMode,
+              previewVariant
+            )}
           </em>
         );
 
       case 'strike':
         return (
           <s key={idx} className="line-through opacity-85">
-            {renderInlineTokens(token.children, variant, previewMode, previewVariant)}
+            {renderInlineTokens(
+              token.children,
+              variant,
+              mentionCtx,
+              previewMode,
+              previewVariant
+            )}
           </s>
         );
 
@@ -154,7 +325,13 @@ function renderInlineTokens(
         }
         return (
           <SpoilerText key={idx} variant={variant}>
-            {renderInlineTokens(token.children, variant, false, previewVariant)}
+            {renderInlineTokens(
+              token.children,
+              variant,
+              mentionCtx,
+              false,
+              previewVariant
+            )}
           </SpoilerText>
         );
     }
@@ -164,7 +341,8 @@ function renderInlineTokens(
 function renderBlock(
   block: MessageBlock,
   idx: number,
-  variant: FormattedBubbleVariant
+  variant: FormattedBubbleVariant,
+  mentionCtx: MentionRenderContext
 ): React.ReactNode {
   switch (block.type) {
     case 'paragraph':
@@ -173,7 +351,7 @@ function renderBlock(
           {block.lines.map((lineTokens, lineIdx) => (
             <React.Fragment key={lineIdx}>
               {lineIdx > 0 && '\n'}
-              {renderInlineTokens(lineTokens, variant)}
+              {renderInlineTokens(lineTokens, variant, mentionCtx)}
             </React.Fragment>
           ))}
         </div>
@@ -192,7 +370,7 @@ function renderBlock(
           {block.lines.map((lineTokens, lineIdx) => (
             <React.Fragment key={lineIdx}>
               {lineIdx > 0 && '\n'}
-              {renderInlineTokens(lineTokens, variant)}
+              {renderInlineTokens(lineTokens, variant, mentionCtx)}
             </React.Fragment>
           ))}
         </blockquote>
@@ -241,7 +419,7 @@ function renderBlock(
                 •
               </span>
               <span className="min-w-0 flex-1 whitespace-pre-wrap">
-                {renderInlineTokens(itemTokens, variant)}
+                {renderInlineTokens(itemTokens, variant, mentionCtx)}
               </span>
             </li>
           ))}
@@ -263,7 +441,7 @@ function renderBlock(
                 {item.marker}.
               </span>
               <span className="min-w-0 flex-1 whitespace-pre-wrap">
-                {renderInlineTokens(item.tokens, variant)}
+                {renderInlineTokens(item.tokens, variant, mentionCtx)}
               </span>
             </li>
           ))}
@@ -276,20 +454,39 @@ export function FormattedMessageText({
   text,
   variant = 'incoming',
   className = '',
+  mentions,
+  currentUserId,
+  onMentionClick,
 }: {
   text: string;
   variant?: FormattedBubbleVariant;
   className?: string;
+  mentions?: MessageMention[];
+  currentUserId?: string;
+  onMentionClick?: (mention: MessageMention) => void;
 }) {
+  const navigate = useNavigate();
   const blocks = useMemo(() => parseMessageBlocks(text), [text]);
 
   if (blocks.length === 0) return null;
+
+  const mentionCtx: MentionRenderContext = {
+    mentions,
+    currentUserId,
+    onUserMentionClick: (mention) => {
+      if (onMentionClick) {
+        onMentionClick(mention);
+      } else if (mention.type === 'user' && mention.username) {
+        navigate(`/u/${mention.username}`);
+      }
+    },
+  };
 
   return (
     <div
       className={`min-w-0 max-w-full space-y-1 break-words [overflow-wrap:anywhere] ${className}`}
     >
-      {blocks.map((block, idx) => renderBlock(block, idx, variant))}
+      {blocks.map((block, idx) => renderBlock(block, idx, variant, mentionCtx))}
     </div>
   );
 }
@@ -297,13 +494,24 @@ export function FormattedMessageText({
 export function FormattedMessagePreview({
   text,
   variant = 'muted',
+  mentions,
+  currentUserId,
 }: {
   text: string;
   variant?: FormattedPreviewVariant;
+  mentions?: MessageMention[];
+  currentUserId?: string;
 }) {
   const tokens = useMemo(() => buildPreviewTokens(text), [text]);
   if (tokens.length === 0) return <>{text}</>;
   const bubbleVariant: FormattedBubbleVariant =
     variant === 'outgoing' ? 'outgoing' : 'incoming';
-  return <>{renderInlineTokens(tokens, bubbleVariant, true, variant)}</>;
+  const mentionCtx: MentionRenderContext = {
+    mentions,
+    currentUserId,
+    onUserMentionClick: () => {},
+  };
+  return (
+    <>{renderInlineTokens(tokens, bubbleVariant, mentionCtx, true, variant)}</>
+  );
 }

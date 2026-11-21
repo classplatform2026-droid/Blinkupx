@@ -3,10 +3,14 @@ import { Types } from 'mongoose';
 import type { Server } from 'socket.io';
 import { env } from '../../config/env.ts';
 import { Conversation, type IConversation } from '../../models/Conversation.ts';
-import { Message, type IMessage } from '../../models/Message.ts';
+import { Message, type IMessage, type IMessageMention } from '../../models/Message.ts';
 import { User } from '../../models/User.ts';
 import { extractUrlStubs } from '../../utils/linkPreview.ts';
 import { resolveUserSettings } from '../../utils/serializers.ts';
+import {
+  resolveConversationMentions,
+  serializeMessageMentions,
+} from '../mentionService.ts';
 import { PUBLIC_USER_SELECT } from '../privacyService.ts';
 import { dispatchMessagePushNotifications } from '../pushService.ts';
 import {
@@ -70,6 +74,7 @@ function serializeAiReplyDoc(msg: IMessage) {
           messageType: string;
           senderType?: string;
           deletedAt?: Date | null;
+          mentions?: IMessageMention[];
           senderId?: { _id?: { toString(): string }; fullName?: string; username?: string };
         })
       : null;
@@ -96,9 +101,13 @@ function serializeAiReplyDoc(msg: IMessage) {
             replyObj.senderType === 'ai'
               ? BLINK_AI_DISPLAY_NAME
               : replyObj.senderId?.fullName || 'User',
+          mentions: replyObj.deletedAt
+            ? []
+            : serializeMessageMentions(replyObj.mentions),
         }
       : null,
     forwardedFrom: null,
+    mentions: isDeleted ? [] : serializeMessageMentions(msg.mentions),
     callEvent: null,
     aiMeta: msg.aiMeta
       ? {
@@ -132,6 +141,17 @@ async function persistAndDispatchAiMessage(params: {
   const cleanContent = content.trim().slice(0, 4800);
   const initialLinks = extractUrlStubs(cleanContent);
 
+  const {
+    mentions: resolvedMentions,
+    directlyMentionedIds,
+    mentionsEveryone,
+  } = await resolveConversationMentions({
+    conversation,
+    content: cleanContent,
+    senderId: BLINK_AI_SENDER_ID,
+    senderType: 'ai',
+  });
+
   let aiMsg: IMessage;
   try {
     aiMsg = await Message.create({
@@ -147,6 +167,7 @@ async function persistAndDispatchAiMessage(params: {
         ? new Types.ObjectId(triggerMessageId)
         : null,
       forwardedFrom: null,
+      mentions: resolvedMentions,
       aiMeta: {
         requestId,
         triggerMessageId,
@@ -183,7 +204,7 @@ async function persistAndDispatchAiMessage(params: {
     .populate('senderId', PUBLIC_USER_SELECT)
     .populate({
       path: 'replyTo',
-      select: 'content messageType senderType deletedAt senderId',
+      select: 'content messageType senderType deletedAt senderId mentions',
       populate: { path: 'senderId', select: 'fullName username' },
     });
 
@@ -234,18 +255,38 @@ async function persistAndDispatchAiMessage(params: {
               : notif.communityMessages;
         if (!categoryEnabled) continue;
 
+        const isDirectMention = directlyMentionedIds.has(pid);
+        const isEveryoneMention = !isDirectMention && mentionsEveryone;
         const showPreview = notif.messagePreview;
+        const defaultTitle =
+          conversation.type === 'direct'
+            ? BLINK_AI_DISPLAY_NAME
+            : `${BLINK_AI_DISPLAY_NAME} • ${conversation.name}`;
+        const mentionTitle = isDirectMention
+          ? conversation.type === 'direct'
+            ? `${BLINK_AI_DISPLAY_NAME} mentioned you`
+            : `${BLINK_AI_DISPLAY_NAME} mentioned you • ${conversation.name}`
+          : isEveryoneMention
+            ? `${BLINK_AI_DISPLAY_NAME} mentioned @everyone • ${conversation.name}`
+            : defaultTitle;
+        const mentionBody = showPreview
+          ? cleanContent.slice(0, 120)
+          : isDirectMention
+            ? 'Blink mentioned you in a message'
+            : isEveryoneMention
+              ? 'Blink mentioned @everyone'
+              : 'New message from Blink';
+
         io.to(`user:${pid}`).emit('notification:message', {
           id: serialized.id,
           conversationId: convId,
           conversationType: conversation.type,
           communityId: conversation.communityId ? conversation.communityId.toString() : null,
-          title:
-            conversation.type === 'direct'
-              ? BLINK_AI_DISPLAY_NAME
-              : `${BLINK_AI_DISPLAY_NAME} • ${conversation.name}`,
-          body: showPreview ? cleanContent.slice(0, 120) : 'New message from Blink',
+          title: mentionTitle,
+          body: mentionBody,
           previewHidden: !showPreview,
+          mentioned: isDirectMention || isEveryoneMention,
+          mentionType: isDirectMention ? 'direct' : isEveryoneMention ? 'everyone' : null,
           soundEnabled: notif.soundEnabled,
           soundTone: notif.soundTone,
           vibrationEnabled: notif.vibrationEnabled,
@@ -270,6 +311,8 @@ async function persistAndDispatchAiMessage(params: {
         previewText: cleanContent,
         recipientDocs: pushRecipients,
         participantMuteMap,
+        directlyMentionedIds,
+        mentionsEveryone,
       }).catch(() => {
         // Best-effort push notification for AI response
       });

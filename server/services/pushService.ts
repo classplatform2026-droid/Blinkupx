@@ -283,6 +283,8 @@ export async function dispatchMessagePushNotifications(params: {
     blockedUsers?: Types.ObjectId[];
   }>;
   participantMuteMap: Map<string, Date | null>;
+  directlyMentionedIds?: Set<string>;
+  mentionsEveryone?: boolean;
 }): Promise<void> {
   if (!ensureVapidConfigured()) return;
 
@@ -354,7 +356,7 @@ export async function dispatchMessagePushNotifications(params: {
       : params.conversationType === 'group'
         ? 'group_message'
         : 'community_message';
-  const title =
+  const defaultTitle =
     params.conversationType === 'direct'
       ? params.senderName
       : `${params.senderName} • ${params.conversationName}`;
@@ -381,14 +383,33 @@ export async function dispatchMessagePushNotifications(params: {
           ? params.senderAvatar
           : '/blinkupz-icon.png';
 
+      const isDirectMention = Boolean(params.directlyMentionedIds?.has(pid));
+      const isEveryoneMention = !isDirectMention && Boolean(params.mentionsEveryone);
       const showPreview = notif.messagePreview;
+
+      const title = isDirectMention
+        ? params.conversationType === 'direct'
+          ? `${params.senderName} mentioned you`
+          : `${params.senderName} mentioned you • ${params.conversationName}`
+        : isEveryoneMention
+          ? `${params.senderName} mentioned @everyone • ${params.conversationName}`
+          : defaultTitle;
+
+      const body = showPreview
+        ? params.previewText.slice(0, 140)
+        : isDirectMention
+          ? 'You were mentioned in a message'
+          : isEveryoneMention
+            ? 'Everyone was mentioned in a message'
+            : 'New message';
+
       return {
         type: notifType,
         messageId: params.messageId,
         conversationId: params.conversationId,
         communityId: params.communityId,
         title,
-        body: showPreview ? params.previewText.slice(0, 140) : 'New message',
+        body,
         icon: avatarIcon,
         tag: `blinkupz-conv-${params.conversationId}`,
         url: targetUrl,

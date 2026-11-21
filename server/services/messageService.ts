@@ -2,8 +2,12 @@ import { Types } from 'mongoose';
 import type { Server } from 'socket.io';
 import { Community } from '../models/Community.ts';
 import { Conversation } from '../models/Conversation.ts';
-import { Message, type IMessage } from '../models/Message.ts';
+import { Message, type IMessage, type IMessageMention } from '../models/Message.ts';
 import { User } from '../models/User.ts';
+import {
+  resolveConversationMentions,
+  serializeMessageMentions,
+} from './mentionService.ts';
 import {
   getBlockRelationship,
   PUBLIC_USER_SELECT,
@@ -54,6 +58,7 @@ export function serializeMessage(msg: IMessage, viewerContext?: ViewerRelationsh
           messageType: string;
           senderType?: string;
           deletedAt?: Date | null;
+          mentions?: IMessageMention[];
           senderId?: { _id?: { toString(): string }; fullName?: string; username?: string };
         })
       : null;
@@ -92,9 +97,13 @@ export function serializeMessage(msg: IMessage, viewerContext?: ViewerRelationsh
             replyObj.senderType === 'ai'
               ? BLINK_AI_DISPLAY_NAME
               : replyObj.senderId?.fullName || 'User',
+          mentions: replyObj.deletedAt
+            ? []
+            : serializeMessageMentions(replyObj.mentions),
         }
       : null,
     forwardedFrom: isDeleted ? null : msg.forwardedFrom,
+    mentions: isDeleted ? [] : serializeMessageMentions(msg.mentions),
     callEvent:
       !isDeleted && msg.callEvent && msg.callEvent.callId
         ? {
@@ -225,7 +234,7 @@ export async function createAndDispatchMessage(params: {
       .populate('senderId', PUBLIC_USER_SELECT)
       .populate({
         path: 'replyTo',
-        select: 'content messageType senderType deletedAt senderId',
+        select: 'content messageType senderType deletedAt senderId mentions',
         populate: { path: 'senderId', select: 'fullName username' },
       });
 
@@ -242,6 +251,38 @@ export async function createAndDispatchMessage(params: {
     .filter((id) => id !== userId);
 
   const initialLinks = hasText ? extractUrlStubs(parsed.content.trim()) : [];
+
+  let forwardedSourceMentions: IMessageMention[] | undefined;
+  if (
+    parsed.forwardedFrom?.messageId &&
+    Types.ObjectId.isValid(parsed.forwardedFrom.messageId)
+  ) {
+    const sourceMsg = await Message.findById(parsed.forwardedFrom.messageId)
+      .select('conversationId mentions deletedAt')
+      .lean();
+    if (sourceMsg && !sourceMsg.deletedAt && sourceMsg.mentions?.length) {
+      const canAccessSource = await Conversation.exists({
+        _id: sourceMsg.conversationId,
+        'participants.userId': new Types.ObjectId(userId),
+      });
+      if (canAccessSource) {
+        forwardedSourceMentions = sourceMsg.mentions;
+      }
+    }
+  }
+
+  const {
+    mentions: resolvedMentions,
+    directlyMentionedIds,
+    mentionsEveryone,
+  } = await resolveConversationMentions({
+    conversation: conv,
+    content: parsed.content.trim(),
+    attachments: parsed.attachments,
+    senderId: userId,
+    senderType: 'user',
+    forwardedSourceMentions,
+  });
 
   let msg: IMessage;
   try {
@@ -260,6 +301,7 @@ export async function createAndDispatchMessage(params: {
             senderName: parsed.forwardedFrom.senderName,
           }
         : null,
+      mentions: resolvedMentions,
       deliveredTo: [],
       readBy: [new Types.ObjectId(userId)],
       deliveryStatus: 'sent',
@@ -275,7 +317,7 @@ export async function createAndDispatchMessage(params: {
         .populate('senderId', PUBLIC_USER_SELECT)
         .populate({
           path: 'replyTo',
-          select: 'content messageType senderType deletedAt senderId',
+          select: 'content messageType senderType deletedAt senderId mentions',
           populate: { path: 'senderId', select: 'fullName username' },
         });
       if (existing) {
@@ -327,7 +369,7 @@ export async function createAndDispatchMessage(params: {
     .populate('senderId', PUBLIC_USER_SELECT)
     .populate({
       path: 'replyTo',
-      select: 'content messageType senderType deletedAt senderId',
+      select: 'content messageType senderType deletedAt senderId mentions',
       populate: { path: 'senderId', select: 'fullName username' },
     });
 
@@ -399,18 +441,38 @@ export async function createAndDispatchMessage(params: {
 
         if (!categoryEnabled) continue;
 
+        const isDirectMention = directlyMentionedIds.has(pid);
+        const isEveryoneMention = !isDirectMention && mentionsEveryone;
         const showPreview = notif.messagePreview;
+        const defaultTitle =
+          conv.type === 'direct'
+            ? resolvedSenderName
+            : `${resolvedSenderName} • ${conv.name}`;
+        const mentionTitle = isDirectMention
+          ? conv.type === 'direct'
+            ? `${resolvedSenderName} mentioned you`
+            : `${resolvedSenderName} mentioned you • ${conv.name}`
+          : isEveryoneMention
+            ? `${resolvedSenderName} mentioned @everyone • ${conv.name}`
+            : defaultTitle;
+        const mentionBody = showPreview
+          ? previewText.slice(0, 120)
+          : isDirectMention
+            ? 'You were mentioned in a message'
+            : isEveryoneMention
+              ? 'Everyone was mentioned in a message'
+              : 'New message';
+
         io.to(`user:${pid}`).emit('notification:message', {
           id: serialized.id,
           conversationId: conv._id.toString(),
           conversationType: conv.type,
           communityId: conv.communityId ? conv.communityId.toString() : null,
-          title:
-            conv.type === 'direct'
-              ? resolvedSenderName
-              : `${resolvedSenderName} • ${conv.name}`,
-          body: showPreview ? previewText.slice(0, 120) : 'New message',
+          title: mentionTitle,
+          body: mentionBody,
           previewHidden: !showPreview,
+          mentioned: isDirectMention || isEveryoneMention,
+          mentionType: isDirectMention ? 'direct' : isEveryoneMention ? 'everyone' : null,
           soundEnabled: notif.soundEnabled,
           soundTone: notif.soundTone,
           vibrationEnabled: notif.vibrationEnabled,
@@ -434,6 +496,8 @@ export async function createAndDispatchMessage(params: {
       previewText,
       recipientDocs: recipients,
       participantMuteMap,
+      directlyMentionedIds,
+      mentionsEveryone,
     }).catch((err) => {
       console.error('[Push] Failed to dispatch message push notifications:', err);
     });

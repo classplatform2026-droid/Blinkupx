@@ -126,6 +126,7 @@ export function MessageScreen({ conversationId }: { conversationId: string }) {
     scheduleCleanupLocalResources,
   } = useOptimisticChatSender({
     conversationId,
+    conversation,
     user,
     socket,
     hasNewerMessages,
@@ -319,6 +320,7 @@ export function MessageScreen({ conversationId }: { conversationId: string }) {
                 content: 'This message was deleted',
                 attachments: [],
                 reactions: [],
+                mentions: [],
               }
             : m
         )
@@ -463,6 +465,7 @@ export function MessageScreen({ conversationId }: { conversationId: string }) {
                   content: 'This message was deleted',
                   attachments: [],
                   reactions: [],
+                  mentions: [],
                 }
               : m
           )
@@ -913,6 +916,8 @@ export function MessageScreen({ conversationId }: { conversationId: string }) {
                   <FormattedMessagePreview
                     text={conversation.pinnedMessage.content}
                     variant="incoming"
+                    mentions={conversation.pinnedMessage.mentions}
+                    currentUserId={user?.id}
                   />
                 ) : (
                   conversation.pinnedMessage.messageType
@@ -1109,6 +1114,7 @@ export function MessageScreen({ conversationId }: { conversationId: string }) {
       ) : (
         <MessageInput
           key={conversationId}
+          conversation={conversation}
           enterToSend={user?.settings?.enterToSend ?? true}
           replyingTo={replyingTo}
           editingMessage={editingMessage}

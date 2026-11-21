@@ -132,6 +132,7 @@ export function GroupChatPage() {
     scheduleCleanupLocalResources,
   } = useOptimisticChatSender({
     conversationId: convIdForHook,
+    conversation,
     user,
     socket,
     hasNewerMessages,
@@ -329,6 +330,7 @@ export function GroupChatPage() {
                 content: 'This message was deleted',
                 attachments: [],
                 reactions: [],
+                mentions: [],
               }
             : m
         )
@@ -753,6 +755,8 @@ export function GroupChatPage() {
                   <FormattedMessagePreview
                     text={conversation.pinnedMessage.content}
                     variant="incoming"
+                    mentions={conversation.pinnedMessage.mentions}
+                    currentUserId={user?.id}
                   />
                 ) : (
                   conversation.pinnedMessage.messageType
@@ -864,6 +868,7 @@ export function GroupChatPage() {
                                     content: 'This message was deleted',
                                     attachments: [],
                                     reactions: [],
+                                    mentions: [],
                                   }
                                 : item
                             )
@@ -973,6 +978,8 @@ export function GroupChatPage() {
       {canSend ? (
         <MessageInput
           key={convId}
+          conversation={conversation}
+          canMentionEveryone={canSend}
           enterToSend={user?.settings?.enterToSend ?? true}
           replyingTo={replyingTo}
           editingMessage={editingMessage}

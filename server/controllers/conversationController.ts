@@ -5,6 +5,7 @@ import { Community } from '../models/Community.ts';
 import { Conversation, type IConversation } from '../models/Conversation.ts';
 import { Message } from '../models/Message.ts';
 import { User } from '../models/User.ts';
+import { serializeMessageMentions } from '../services/mentionService.ts';
 import {
   getBlockRelationship,
   getViewerRelationshipContext,
@@ -86,6 +87,7 @@ async function formatConversation(
         id: pm._id.toString(),
         content: pm.content,
         messageType: pm.messageType,
+        mentions: serializeMessageMentions(pm.mentions),
         sender: pm.senderType === 'ai' ? BLINK_AI_SERIALIZED_SENDER : pm.senderId,
       };
     }

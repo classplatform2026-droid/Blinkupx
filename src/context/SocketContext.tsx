@@ -477,6 +477,8 @@ export function SocketProvider({ children }: { children: React.ReactNode }) {
         title: string;
         body: string;
         previewHidden?: boolean;
+        mentioned?: boolean;
+        mentionType?: 'direct' | 'everyone' | null;
         soundEnabled?: boolean;
         soundTone?: NotificationSoundTone;
         vibrationEnabled?: boolean;
@@ -504,7 +506,11 @@ export function SocketProvider({ children }: { children: React.ReactNode }) {
 
         const displayBody = notifPrefs.messagePreview
           ? payload.body
-          : 'New message';
+          : payload.mentioned
+            ? payload.mentionType === 'everyone'
+              ? 'Everyone was mentioned in a message'
+              : 'You were mentioned in a message'
+            : 'New message';
 
         if (notifPrefs.soundEnabled && payload.soundEnabled !== false) {
           playNotificationTone(payload.soundTone || notifPrefs.soundTone);

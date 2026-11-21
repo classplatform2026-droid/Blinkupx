@@ -3,6 +3,7 @@ import type React from 'react';
 import type { Socket } from 'socket.io-client';
 import { extractApiError, mediaApi, messageApi } from '../services/api';
 import type {
+  Conversation,
   MediaUploadProgressItem,
   Message,
   MessageAttachment,
@@ -14,6 +15,7 @@ import {
   resolveBatchMessageType,
   type StagedMediaItem,
 } from '../utils/mediaConfig';
+import { resolveOptimisticMentions } from '../utils/mentions';
 import { getAudioExtensionFromMime } from '../utils/voiceRecorder';
 import {
   enqueueOfflineOutgoingMessage,
@@ -43,6 +45,7 @@ export interface OutgoingMessagePayload {
 
 interface UseOptimisticChatSenderOptions {
   conversationId: string;
+  conversation?: Conversation | null;
   user: User | null;
   socket: Socket | null;
   hasNewerMessages: boolean;
@@ -57,6 +60,7 @@ const UPLOAD_CONCURRENCY = 3;
 
 export function useOptimisticChatSender({
   conversationId,
+  conversation,
   user,
   socket,
   hasNewerMessages,
@@ -478,6 +482,12 @@ export function useOptimisticChatSender({
             }));
       }
 
+      const optimisticMentions = resolveOptimisticMentions(
+        payload.content || '',
+        conversation,
+        initialAttachments
+      );
+
       const optimistic = createOptimisticMessage({
         clientMessageId,
         conversationId,
@@ -488,6 +498,7 @@ export function useOptimisticChatSender({
         mediaProgress: initialProgress,
         replyTo: replySnapshot,
         duration: payload.duration,
+        mentions: optimisticMentions,
       });
 
       if (isCurrentlyOffline) {
@@ -518,6 +529,7 @@ export function useOptimisticChatSender({
     [
       user,
       conversationId,
+      conversation,
       hasNewerMessages,
       setMessages,
       setHasNewerMessages,

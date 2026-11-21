@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Mic,
   Paperclip,
@@ -10,11 +10,19 @@ import {
   Trash2,
   X,
 } from 'lucide-react';
+import { useAuth } from '../context/AuthContext';
 import { useToast } from '../context/ToastContext';
 import type { OutgoingMessagePayload } from '../hooks/useOptimisticChatSender';
 import { extractApiError } from '../services/api';
-import type { Message } from '../types';
+import type { Conversation, Message } from '../types';
 import { formatDuration, truncateMiddleFileName } from '../utils/formatters';
+import {
+  buildConversationMentionCandidates,
+  filterMentionCandidates,
+  getValidMentionUsernameSet,
+  type ActiveMentionMatch,
+  type MentionCandidate,
+} from '../utils/mentions';
 import {
   createStagedMediaItems,
   MAX_MEDIA_FILES_PER_MESSAGE,
@@ -30,6 +38,7 @@ import { AttachmentMenu } from './AttachmentMenu';
 import { EmojiPicker } from './EmojiPicker';
 import { FormattedMessagePreview } from './FormattedMessageText';
 import { MediaComposerStrip } from './MediaComposerStrip';
+import { MentionAutocompleteDropdown } from './MentionAutocompleteDropdown';
 import {
   RichTextComposer,
   type RichTextComposerHandle,
@@ -39,6 +48,8 @@ import { VoiceMessagePlayer } from './VoiceMessagePlayer';
 export type { OutgoingMessagePayload };
 
 interface MessageInputProps {
+  conversation?: Conversation | null;
+  canMentionEveryone?: boolean;
   enterToSend?: boolean;
   replyingTo: Message | null;
   editingMessage: Message | null;
@@ -64,6 +75,8 @@ const ACCEPT_MAP: Record<'image' | 'video' | 'document', string> = {
 const MIXED_MEDIA_ACCEPT = `${ACCEPT_MAP.image},${ACCEPT_MAP.video},${ACCEPT_MAP.document}`;
 
 export function MessageInput({
+  conversation,
+  canMentionEveryone = true,
   enterToSend = true,
   replyingTo,
   editingMessage,
@@ -74,12 +87,48 @@ export function MessageInput({
   onSendMessage,
   onSaveEdit,
 }: MessageInputProps) {
+  const { user } = useAuth();
   const { showToast } = useToast();
   const [text, setText] = useState('');
   const [savingEdit, setSavingEdit] = useState(false);
   const [showAttachments, setShowAttachments] = useState(false);
   const [showEmoji, setShowEmoji] = useState(false);
   const [isDraggingOver, setIsDraggingOver] = useState(false);
+  const [activeMention, setActiveMention] = useState<ActiveMentionMatch | null>(null);
+  const [dismissedAtStart, setDismissedAtStart] = useState<number | null>(null);
+  const [selectedMentionIdx, setSelectedMentionIdx] = useState(0);
+  const composerRowRef = useRef<HTMLDivElement>(null);
+
+  const mentionCandidates = useMemo(
+    () =>
+      buildConversationMentionCandidates({
+        conversation,
+        currentUserId: user?.id,
+        canMentionEveryone,
+      }),
+    [conversation, user?.id, canMentionEveryone]
+  );
+
+  const validMentionUsernames = useMemo(
+    () =>
+      getValidMentionUsernameSet(
+        conversation,
+        user?.username,
+        canMentionEveryone
+      ),
+    [conversation, user?.username, canMentionEveryone]
+  );
+
+  const filteredMentionCandidates = useMemo(() => {
+    if (!activeMention) return [];
+    return filterMentionCandidates(mentionCandidates, activeMention.query);
+  }, [activeMention, mentionCandidates]);
+
+  const showMentionDropdown = Boolean(
+    activeMention &&
+      dismissedAtStart !== activeMention.start &&
+      filteredMentionCandidates.length > 0
+  );
 
   // Staged multi-media items (ownership transfers to optimistic message on send)
   const [stagedMedia, setStagedMedia] = useState<StagedMediaItem[]>([]);
@@ -167,6 +216,124 @@ export function MessageInput({
       });
     };
   }, []);
+
+  useEffect(() => {
+    if (!activeMention) {
+      setDismissedAtStart(null);
+      setSelectedMentionIdx(0);
+    } else if (dismissedAtStart !== null && dismissedAtStart !== activeMention.start) {
+      setDismissedAtStart(null);
+    }
+  }, [activeMention, dismissedAtStart]);
+
+  useEffect(() => {
+    setSelectedMentionIdx((prev) =>
+      filteredMentionCandidates.length === 0
+        ? 0
+        : Math.min(prev, filteredMentionCandidates.length - 1)
+    );
+  }, [filteredMentionCandidates.length]);
+
+  useEffect(() => {
+    if (!showMentionDropdown) return;
+    setShowEmoji(false);
+    setShowAttachments(false);
+  }, [showMentionDropdown]);
+
+  useEffect(() => {
+    if (!showMentionDropdown) return;
+    const handleOutsidePointerDown = (e: PointerEvent) => {
+      if (
+        composerRowRef.current &&
+        !composerRowRef.current.contains(e.target as Node)
+      ) {
+        setActiveMention(null);
+      }
+    };
+    document.addEventListener('pointerdown', handleOutsidePointerDown);
+    return () => document.removeEventListener('pointerdown', handleOutsidePointerDown);
+  }, [showMentionDropdown]);
+
+  const handleActiveMentionChange = useCallback(
+    (match: ActiveMentionMatch | null) => {
+      setActiveMention((prev) => {
+        if (
+          prev?.query === match?.query &&
+          prev?.start === match?.start &&
+          prev?.end === match?.end
+        ) {
+          return prev;
+        }
+        return match;
+      });
+      if (match) {
+        setSelectedMentionIdx(0);
+      }
+    },
+    []
+  );
+
+  const handleSelectMention = useCallback(
+    (candidate: MentionCandidate) => {
+      if (!activeMention) return;
+      const snippet = `@${candidate.username} `;
+      const { start, end } = activeMention;
+      setActiveMention(null);
+      setDismissedAtStart(null);
+      composerRef.current?.replaceRange(start, end, snippet);
+    },
+    [activeMention]
+  );
+
+  const handleMentionDropdownKeyDown = useCallback(
+    (e: React.KeyboardEvent<HTMLDivElement>): boolean => {
+      if (!showMentionDropdown) return false;
+
+      if (e.key === 'ArrowDown') {
+        e.preventDefault();
+        setSelectedMentionIdx(
+          (prev) => (prev + 1) % filteredMentionCandidates.length
+        );
+        return true;
+      }
+
+      if (e.key === 'ArrowUp') {
+        e.preventDefault();
+        setSelectedMentionIdx(
+          (prev) =>
+            (prev - 1 + filteredMentionCandidates.length) %
+            filteredMentionCandidates.length
+        );
+        return true;
+      }
+
+      if (e.key === 'Enter' || e.key === 'Tab') {
+        const chosen =
+          filteredMentionCandidates[selectedMentionIdx] ||
+          filteredMentionCandidates[0];
+        if (chosen) {
+          e.preventDefault();
+          handleSelectMention(chosen);
+          return true;
+        }
+      }
+
+      if (e.key === 'Escape' && activeMention) {
+        e.preventDefault();
+        setDismissedAtStart(activeMention.start);
+        return true;
+      }
+
+      return false;
+    },
+    [
+      showMentionDropdown,
+      filteredMentionCandidates,
+      selectedMentionIdx,
+      handleSelectMention,
+      activeMention,
+    ]
+  );
 
   const handleTextChange = (val: string) => {
     setText(val);
@@ -523,13 +690,23 @@ export function MessageInput({
               </p>
               <p className="text-xs text-[#999999] truncate">
                 {editingMessage?.content ? (
-                  <FormattedMessagePreview text={editingMessage.content} variant="muted" />
+                  <FormattedMessagePreview
+                    text={editingMessage.content}
+                    variant="muted"
+                    mentions={editingMessage.mentions}
+                    currentUserId={user?.id}
+                  />
                 ) : editingMessage && editingMessage.attachments.length > 0 ? (
                   `${editingMessage.attachments.length} ${
                     editingMessage.attachments.length === 1 ? 'attachment' : 'attachments'
                   }`
                 ) : replyingTo?.content ? (
-                  <FormattedMessagePreview text={replyingTo.content} variant="muted" />
+                  <FormattedMessagePreview
+                    text={replyingTo.content}
+                    variant="muted"
+                    mentions={replyingTo.mentions}
+                    currentUserId={user?.id}
+                  />
                 ) : replyingTo?.attachments?.[0]?.fileName ? (
                   truncateMiddleFileName(replyingTo.attachments[0].fileName, 44)
                 ) : (
@@ -736,7 +913,16 @@ export function MessageInput({
           </button>
         </div>
       ) : (
-        <div className="relative flex items-end gap-2">
+        <div ref={composerRowRef} className="relative flex items-end gap-2">
+          {showMentionDropdown && (
+            <MentionAutocompleteDropdown
+              candidates={filteredMentionCandidates}
+              selectedIndex={selectedMentionIdx}
+              onHighlightIndex={setSelectedMentionIdx}
+              onSelect={handleSelectMention}
+            />
+          )}
+
           {showAttachments && (
             <div className="absolute bottom-14 left-0 z-30">
               <AttachmentMenu onSelectType={handlePickAttachment} />
@@ -787,6 +973,9 @@ export function MessageInput({
             onSubmit={() => void handleSubmit()}
             onPasteFiles={handlePastedFiles}
             enterToSend={enterToSend}
+            validMentionUsernames={validMentionUsernames}
+            onActiveMentionChange={handleActiveMentionChange}
+            onDropdownKeyDown={handleMentionDropdownKeyDown}
             placeholder={
               editingMessage
                 ? editingMessage.messageType === 'text'

@@ -6,6 +6,10 @@ import React, {
   useRef,
 } from 'react';
 import {
+  findActiveMentionQuery,
+  type ActiveMentionMatch,
+} from '../utils/mentions';
+import {
   parseMessageBlocks,
   type InlineToken,
   type MessageBlock,
@@ -14,6 +18,7 @@ import {
 export interface RichTextComposerHandle {
   focus: () => void;
   insertText: (snippet: string) => void;
+  replaceRange: (start: number, end: number, replacement: string) => void;
 }
 
 interface RichTextComposerProps {
@@ -25,6 +30,9 @@ interface RichTextComposerProps {
   placeholder?: string;
   className?: string;
   ariaLabel?: string;
+  validMentionUsernames?: Set<string>;
+  onActiveMentionChange?: (match: ActiveMentionMatch | null) => void;
+  onDropdownKeyDown?: (e: React.KeyboardEvent<HTMLDivElement>) => boolean;
 }
 
 type VisualBlock =
@@ -328,14 +336,31 @@ function inspectEditorDom(root: HTMLElement): {
 function getInlineTextConcat(tokens: InlineToken[]): string {
   return tokens
     .map((t) =>
-      t.type === 'text' || t.type === 'link' || t.type === 'code'
+      t.type === 'text' ||
+      t.type === 'link' ||
+      t.type === 'code' ||
+      t.type === 'mention'
         ? t.text
         : getInlineTextConcat(t.children)
     )
     .join('');
 }
 
-function inlineChildrenMatch(domNodes: Node[], tokens: InlineToken[]): boolean {
+function isMentionHighlightActive(
+  username: string,
+  validMentionUsernames?: Set<string>
+): boolean {
+  if (validMentionUsernames) {
+    return validMentionUsernames.has(username.toLowerCase());
+  }
+  return username === 'blink' || username === 'everyone';
+}
+
+function inlineChildrenMatch(
+  domNodes: Node[],
+  tokens: InlineToken[],
+  validMentionUsernames?: Set<string>
+): boolean {
   let tokenIdx = 0;
   let nodeIdx = 0;
 
@@ -387,6 +412,27 @@ function inlineChildrenMatch(domNodes: Node[], tokens: InlineToken[]): boolean {
     const fmt = el.getAttribute('data-fmt');
     if (fmt !== tok.type) return false;
 
+    if (tok.type === 'mention') {
+      const expectedActive = isMentionHighlightActive(
+        tok.username,
+        validMentionUsernames
+      )
+        ? '1'
+        : '0';
+      if (
+        el.getAttribute('data-username') === tok.username &&
+        el.getAttribute('data-active') === expectedActive &&
+        el.childNodes.length === 1 &&
+        el.childNodes[0].nodeType === Node.TEXT_NODE &&
+        (el.childNodes[0].nodeValue || '') === tok.text
+      ) {
+        nodeIdx += 1;
+        tokenIdx += 1;
+        continue;
+      }
+      return false;
+    }
+
     if (tok.type === 'link' || tok.type === 'code') {
       if (
         el.childNodes.length === 1 &&
@@ -400,7 +446,13 @@ function inlineChildrenMatch(domNodes: Node[], tokens: InlineToken[]): boolean {
       return false;
     }
 
-    if (!inlineChildrenMatch(Array.from(el.childNodes), tok.children)) {
+    if (
+      !inlineChildrenMatch(
+        Array.from(el.childNodes),
+        tok.children,
+        validMentionUsernames
+      )
+    ) {
       return false;
     }
     nodeIdx += 1;
@@ -412,7 +464,8 @@ function inlineChildrenMatch(domNodes: Node[], tokens: InlineToken[]): boolean {
 
 function doesDomMatchVisualLines(
   root: HTMLElement,
-  visualLines: VisualBlock[]
+  visualLines: VisualBlock[],
+  validMentionUsernames?: Set<string>
 ): boolean {
   const children = Array.from(root.childNodes);
   if (children.length !== visualLines.length) return false;
@@ -437,7 +490,13 @@ function doesDomMatchVisualLines(
       continue;
     }
 
-    if (!inlineChildrenMatch(Array.from(el.childNodes), expected.tokens)) {
+    if (
+      !inlineChildrenMatch(
+        Array.from(el.childNodes),
+        expected.tokens,
+        validMentionUsernames
+      )
+    ) {
       return false;
     }
   }
@@ -445,7 +504,10 @@ function doesDomMatchVisualLines(
   return true;
 }
 
-function createInlineDomNode(token: InlineToken): Node {
+function createInlineDomNode(
+  token: InlineToken,
+  validMentionUsernames?: Set<string>
+): Node {
   switch (token.type) {
     case 'text':
       return document.createTextNode(token.text);
@@ -454,6 +516,27 @@ function createInlineDomNode(token: InlineToken): Node {
       const span = document.createElement('span');
       span.setAttribute('data-fmt', 'link');
       span.className = 'underline underline-offset-2 text-[#FFFFFF]';
+      span.textContent = token.text;
+      return span;
+    }
+
+    case 'mention': {
+      const isActive = isMentionHighlightActive(
+        token.username,
+        validMentionUsernames
+      );
+      const span = document.createElement('span');
+      span.setAttribute('data-fmt', 'mention');
+      span.setAttribute('data-username', token.username);
+      span.setAttribute('data-active', isActive ? '1' : '0');
+      if (isActive) {
+        span.className =
+          token.username === 'blink'
+            ? 'font-semibold text-[#A3E635] bg-[#A3E635]/15 rounded px-0.5'
+            : token.username === 'everyone'
+              ? 'font-semibold text-[#FCD34D] bg-[#F59E0B]/15 rounded px-0.5'
+              : 'font-semibold text-[#93C5FD] bg-[#60A5FA]/15 rounded px-0.5';
+      }
       span.textContent = token.text;
       return span;
     }
@@ -472,7 +555,7 @@ function createInlineDomNode(token: InlineToken): Node {
       strong.setAttribute('data-fmt', 'bold');
       strong.className = 'font-bold text-[#FFFFFF]';
       for (const child of token.children) {
-        strong.appendChild(createInlineDomNode(child));
+        strong.appendChild(createInlineDomNode(child, validMentionUsernames));
       }
       return strong;
     }
@@ -482,7 +565,7 @@ function createInlineDomNode(token: InlineToken): Node {
       em.setAttribute('data-fmt', 'italic');
       em.className = 'italic';
       for (const child of token.children) {
-        em.appendChild(createInlineDomNode(child));
+        em.appendChild(createInlineDomNode(child, validMentionUsernames));
       }
       return em;
     }
@@ -492,7 +575,7 @@ function createInlineDomNode(token: InlineToken): Node {
       s.setAttribute('data-fmt', 'strike');
       s.className = 'line-through opacity-80';
       for (const child of token.children) {
-        s.appendChild(createInlineDomNode(child));
+        s.appendChild(createInlineDomNode(child, validMentionUsernames));
       }
       return s;
     }
@@ -504,7 +587,7 @@ function createInlineDomNode(token: InlineToken): Node {
       span.className =
         'rounded px-1 py-0.5 bg-[#3A3A3A] text-[#E5E5E5] border border-dashed border-[#555555]';
       for (const child of token.children) {
-        span.appendChild(createInlineDomNode(child));
+        span.appendChild(createInlineDomNode(child, validMentionUsernames));
       }
       return span;
     }
@@ -513,7 +596,8 @@ function createInlineDomNode(token: InlineToken): Node {
 
 function renderVisualLinesIntoRoot(
   root: HTMLElement,
-  visualLines: VisualBlock[]
+  visualLines: VisualBlock[],
+  validMentionUsernames?: Set<string>
 ) {
   const frag = document.createDocumentFragment();
 
@@ -557,7 +641,7 @@ function renderVisualLinesIntoRoot(
       div.appendChild(document.createElement('br'));
     } else {
       for (const tok of line.tokens) {
-        div.appendChild(createInlineDomNode(tok));
+        div.appendChild(createInlineDomNode(tok, validMentionUsernames));
       }
     }
 
@@ -750,6 +834,9 @@ export const RichTextComposer = forwardRef<
     placeholder = 'Write a message...',
     className = '',
     ariaLabel = 'Message input',
+    validMentionUsernames,
+    onActiveMentionChange,
+    onDropdownKeyDown,
   },
   ref
 ) {
@@ -806,11 +893,15 @@ export const RichTextComposer = forwardRef<
     const blocks = parseMessageBlocks(value);
     const visualLines = expandBlocksToVisualLines(blocks, value);
 
-    const domAlreadyMatches = doesDomMatchVisualLines(root, visualLines);
+    const domAlreadyMatches = doesDomMatchVisualLines(
+      root,
+      visualLines,
+      validMentionUsernames
+    );
     const isInitialRender = lastRenderedValueRef.current === null;
 
     if (!domAlreadyMatches || isInitialRender) {
-      renderVisualLinesIntoRoot(root, visualLines);
+      renderVisualLinesIntoRoot(root, visualLines, validMentionUsernames);
 
       const isFocused =
         typeof document !== 'undefined' && document.activeElement === root;
@@ -834,7 +925,7 @@ export const RichTextComposer = forwardRef<
     }
 
     lastRenderedValueRef.current = value;
-  }, [value, applySelectionToDom]);
+  }, [value, validMentionUsernames, applySelectionToDom]);
 
   const commitChangeWithCaret = useCallback(
     (nextValue: string, caretStart: number, caretEnd = caretStart) => {
@@ -882,9 +973,21 @@ export const RichTextComposer = forwardRef<
         const nextPos = safeStart + snippet.length;
         root?.focus();
         commitChangeWithCaret(nextVal, nextPos, nextPos);
+        onActiveMentionChange?.(findActiveMentionQuery(nextVal, nextPos));
+      },
+      replaceRange: (start: number, end: number, replacement: string) => {
+        const safeStart = Math.max(0, Math.min(start, value.length));
+        const safeEnd = Math.max(safeStart, Math.min(end, value.length));
+        const nextVal =
+          value.slice(0, safeStart) + replacement + value.slice(safeEnd);
+        const nextPos = safeStart + replacement.length;
+        exitBoundaryRef.current = null;
+        editorRef.current?.focus();
+        commitChangeWithCaret(nextVal, nextPos, nextPos);
+        onActiveMentionChange?.(findActiveMentionQuery(nextVal, nextPos));
       },
     }),
-    [value, applySelectionToDom, commitChangeWithCaret]
+    [value, applySelectionToDom, commitChangeWithCaret, onActiveMentionChange]
   );
 
   const handleInput = () => {
@@ -910,10 +1013,12 @@ export const RichTextComposer = forwardRef<
         // Force DOM sync to move inserted text outside the inline wrapper
         renderVisualLinesIntoRoot(
           root,
-          expandBlocksToVisualLines(parseMessageBlocks(nextRaw), nextRaw)
+          expandBlocksToVisualLines(parseMessageBlocks(nextRaw), nextRaw),
+          validMentionUsernames
         );
         applySelectionToDom(nextPos, nextPos, nextRaw);
         lastRenderedValueRef.current = nextRaw;
+        onActiveMentionChange?.(findActiveMentionQuery(nextRaw, nextPos));
         onChange(nextRaw);
         return;
       }
@@ -933,7 +1038,7 @@ export const RichTextComposer = forwardRef<
     const blocks = parseMessageBlocks(raw);
     const visualLines = expandBlocksToVisualLines(blocks, raw);
 
-    if (!doesDomMatchVisualLines(root, visualLines)) {
+    if (!doesDomMatchVisualLines(root, visualLines, validMentionUsernames)) {
       pendingCaretRef.current = { start: caretStart, end: caretEnd };
     } else {
       // Check if caret just landed on an inline format exit boundary
@@ -948,6 +1053,10 @@ export const RichTextComposer = forwardRef<
       lastRenderedValueRef.current = raw;
     }
 
+    onActiveMentionChange?.(
+      caretStart === caretEnd ? findActiveMentionQuery(raw, caretStart) : null
+    );
+
     if (raw !== value) {
       onChange(raw);
     }
@@ -957,6 +1066,10 @@ export const RichTextComposer = forwardRef<
     if (isComposingRef.current || e.nativeEvent.isComposing) return;
     const root = editorRef.current;
     if (!root) return;
+
+    if (onDropdownKeyDown && onDropdownKeyDown(e)) {
+      return;
+    }
 
     if (e.key === 'Enter') {
       if (enterToSend && !e.shiftKey) {
@@ -1106,6 +1219,9 @@ export const RichTextComposer = forwardRef<
       const s = Math.min(startOffset, endOffset);
       const e = Math.max(startOffset, endOffset);
       lastSelectionRef.current = { start: s, end: e };
+      onActiveMentionChange?.(
+        s === e ? findActiveMentionQuery(raw, s) : null
+      );
 
       // Clear exit boundary if user navigated away from the exact exit point
       if (exitBoundaryRef.current) {
@@ -1123,6 +1239,7 @@ export const RichTextComposer = forwardRef<
     } else {
       lastSelectionRef.current = { start: raw.length, end: raw.length };
       exitBoundaryRef.current = null;
+      onActiveMentionChange?.(null);
     }
   };
 

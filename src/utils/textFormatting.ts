@@ -2,6 +2,7 @@ export type InlineToken =
   | { type: 'text'; text: string }
   | { type: 'link'; text: string; href: string }
   | { type: 'code'; text: string }
+  | { type: 'mention'; text: string; username: string }
   | { type: 'bold'; children: InlineToken[] }
   | { type: 'italic'; children: InlineToken[] }
   | { type: 'strike'; children: InlineToken[] }
@@ -18,6 +19,8 @@ const MAX_INLINE_DEPTH = 4;
 const WORD_CHAR_RE = /[\p{L}\p{N}]/u;
 const URL_START_RE = /^((?:https?:\/\/|www\.)[^\s<>"'`)\]]+)/i;
 const PREV_URL_BOUNDARY_RE = /[\s([{'"*_~|]/;
+const MENTION_LEFT_DISALLOWED_RE = /[a-zA-Z0-9_.]/;
+const MENTION_HANDLE_CHAR_RE = /[a-zA-Z0-9_]/;
 
 function isWordChar(ch: string): boolean {
   return ch !== '' && WORD_CHAR_RE.test(ch);
@@ -173,6 +176,33 @@ export function parseInlineTokens(text: string, depth = 0): InlineToken[] {
             tokens.push({ type: 'strike', children });
           }
           i = closeIdx + 1;
+          continue;
+        }
+      }
+    }
+
+    // 5. @mentions (@username, @everyone, @blink)
+    if (ch === '@') {
+      const prev = i > 0 ? text[i - 1] : '';
+      if (!prev || !MENTION_LEFT_DISALLOWED_RE.test(prev)) {
+        let j = i + 1;
+        while (j < text.length && MENTION_HANDLE_CHAR_RE.test(text[j])) {
+          j += 1;
+        }
+        const handleLen = j - (i + 1);
+        const next = j < text.length ? text[j] : '';
+        const afterNext = j + 1 < text.length ? text[j + 1] : '';
+        const looksLikeEmailDomain =
+          next === '.' && afterNext !== '' && MENTION_HANDLE_CHAR_RE.test(afterNext);
+
+        if (handleLen >= 3 && handleLen <= 24 && !looksLikeEmailDomain) {
+          const rawMention = text.slice(i, j);
+          tokens.push({
+            type: 'mention',
+            text: rawMention,
+            username: rawMention.slice(1).toLowerCase(),
+          });
+          i = j;
           continue;
         }
       }

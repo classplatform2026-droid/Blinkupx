@@ -771,6 +771,8 @@ export function MessageBubble({
                       <FormattedMessagePreview
                         text={message.replyTo.content}
                         variant={effectiveIsOwn ? 'outgoing' : 'muted'}
+                        mentions={message.replyTo.mentions}
+                        currentUserId={user?.id}
                       />
                     ) : (
                       message.replyTo.messageType
@@ -787,6 +789,8 @@ export function MessageBubble({
                     <FormattedMessageText
                       text={visualMedia[0].att.caption}
                       variant={effectiveIsOwn ? 'outgoing' : 'incoming'}
+                      mentions={message.mentions}
+                      currentUserId={user?.id}
                       className="text-xs opacity-90"
                     />
                   )}
@@ -846,6 +850,8 @@ export function MessageBubble({
                         <FormattedMessagePreview
                           text={att.caption}
                           variant={effectiveIsOwn ? 'outgoing' : 'muted'}
+                          mentions={message.mentions}
+                          currentUserId={user?.id}
                         />
                       </p>
                     ) : null
@@ -957,6 +963,8 @@ export function MessageBubble({
                     <FormattedMessageText
                       text={att.caption}
                       variant={effectiveIsOwn ? 'outgoing' : 'incoming'}
+                      mentions={message.mentions}
+                      currentUserId={user?.id}
                       className="text-xs mt-1 opacity-90"
                     />
                   )}
@@ -973,6 +981,8 @@ export function MessageBubble({
                 <FormattedMessageText
                   text={message.content}
                   variant={effectiveIsOwn ? 'outgoing' : 'incoming'}
+                  mentions={message.mentions}
+                  currentUserId={user?.id}
                 />
               ))}
 

@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { ChevronLeft, ChevronRight, Download, Film, Image as ImageIcon } from 'lucide-react';
+import { useAuth } from '../context/AuthContext';
 import { useToast } from '../context/ToastContext';
 import { extractApiError, mediaApi } from '../services/api';
 import type { Message } from '../types';
@@ -19,6 +20,7 @@ export function MediaGalleryModal({
   initialIndex,
   onClose,
 }: MediaGalleryModalProps) {
+  const { user } = useAuth();
   const { showToast } = useToast();
   const [index, setIndex] = useState(initialIndex);
   const [downloading, setDownloading] = useState(false);
@@ -189,6 +191,8 @@ export function MediaGalleryModal({
               <FormattedMessageText
                 text={displayCaption}
                 variant="incoming"
+                mentions={message.mentions}
+                currentUserId={user?.id}
                 className="text-sm text-[#FFFFFF]"
               />
             )}
@@ -196,6 +200,8 @@ export function MediaGalleryModal({
               <FormattedMessageText
                 text={message.content}
                 variant="incoming"
+                mentions={message.mentions}
+                currentUserId={user?.id}
                 className="text-xs text-[#999999]"
               />
             )}

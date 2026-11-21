@@ -10,6 +10,7 @@ export type MessageType =
   | 'call_event';
 export type DeliveryStatus = 'sent' | 'delivered' | 'read';
 export type MessageSenderType = 'user' | 'ai';
+export type MentionType = 'user' | 'everyone' | 'ai';
 export type CallEventStatus =
   | 'completed'
   | 'missed'
@@ -17,6 +18,13 @@ export type CallEventStatus =
   | 'rejected'
   | 'cancelled'
   | 'failed';
+
+export interface IMessageMention {
+  type: MentionType;
+  userId?: Types.ObjectId | null;
+  username: string;
+  fullName?: string;
+}
 
 export interface IMessageAiMeta {
   requestId: string;
@@ -75,6 +83,7 @@ export interface IMessage extends Document {
   } | null;
   callEvent: ICallEventMetadata | null;
   aiMeta: IMessageAiMeta | null;
+  mentions: IMessageMention[];
   reactions: IMessageReaction[];
   editedAt: Date | null;
   deletedAt: Date | null;
@@ -146,6 +155,27 @@ const aiMetaSchema = new Schema<IMessageAiMeta>(
   { _id: false }
 );
 
+const mentionSchema = new Schema<IMessageMention>(
+  {
+    type: { type: String, enum: ['user', 'everyone', 'ai'], required: true },
+    userId: { type: Schema.Types.ObjectId, ref: 'User', default: null },
+    username: {
+      type: String,
+      required: true,
+      trim: true,
+      lowercase: true,
+      maxlength: 32,
+    },
+    fullName: {
+      type: String,
+      default: '',
+      trim: true,
+      maxlength: 80,
+    },
+  },
+  { _id: false }
+);
+
 const messageSchema = new Schema<IMessage>(
   {
     conversationId: {
@@ -208,6 +238,10 @@ const messageSchema = new Schema<IMessage>(
       type: aiMetaSchema,
       default: null,
     },
+    mentions: {
+      type: [mentionSchema],
+      default: [],
+    },
     reactions: {
       type: [reactionSchema],
       default: [],
@@ -257,6 +291,7 @@ messageSchema.index(
     partialFilterExpression: { 'aiMeta.triggerMessageId': { $type: 'string' } },
   }
 );
+messageSchema.index({ conversationId: 1, 'mentions.userId': 1 });
 messageSchema.index({ content: 'text' });
 
 export const Message = mongoose.model<IMessage>('Message', messageSchema);

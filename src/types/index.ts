@@ -113,6 +113,7 @@ export interface Conversation {
     content: string;
     messageType: string;
     sender?: { fullName?: string };
+    mentions?: MessageMention[];
   } | null;
   unreadCount: number;
   isPinned: boolean;
@@ -132,6 +133,15 @@ export interface MessageAttachment {
   mimeType: string;
   duration?: number;
   caption?: string;
+}
+
+export type MentionType = 'user' | 'everyone' | 'ai';
+
+export interface MessageMention {
+  type: MentionType;
+  userId: string | null;
+  username: string;
+  fullName?: string;
 }
 
 export interface MessageReaction {
@@ -199,11 +209,13 @@ export interface Message {
   messageType: 'text' | 'image' | 'video' | 'document' | 'voice' | 'system' | 'call_event';
   attachments: MessageAttachment[];
   links?: MessageLinkPreview[];
+  mentions?: MessageMention[];
   replyTo: {
     id: string;
     content: string;
     messageType: string;
     senderName: string;
+    mentions?: MessageMention[];
   } | null;
   forwardedFrom: {
     messageId: string;

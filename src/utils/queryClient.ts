@@ -238,6 +238,7 @@ export function syncMessageDeleteCaches(
                     content: 'This message was deleted',
                     attachments: [],
                     reactions: [],
+                    mentions: [],
                   }
                 : m
             ),
@@ -250,6 +251,7 @@ export function syncMessageDeleteCaches(
     content: 'This message was deleted',
     attachments: [],
     reactions: [],
+    mentions: [],
   }));
 }
 

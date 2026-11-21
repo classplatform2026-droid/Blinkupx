@@ -9,6 +9,10 @@ import {
   serializeMessage,
 } from '../services/messageService.ts';
 import {
+  notifyNewlyMentionedOnEdit,
+  resolveConversationMentions,
+} from '../services/mentionService.ts';
+import {
   getViewerRelationshipContext,
   PUBLIC_USER_SELECT,
 } from '../services/privacyService.ts';
@@ -81,7 +85,7 @@ export async function listMessages(req: AuthenticatedRequest, res: Response) {
     .populate('senderId', PUBLIC_USER_SELECT)
     .populate({
       path: 'replyTo',
-      select: 'content messageType senderType deletedAt senderId',
+      select: 'content messageType senderType deletedAt senderId mentions',
       populate: { path: 'senderId', select: 'fullName username' },
     });
 
@@ -155,6 +159,9 @@ export async function editMessage(req: AuthenticatedRequest, res: Response) {
     throw new AppError('Message cannot be empty.', 400, 'VALIDATION_ERROR');
   }
 
+  const conv = await Conversation.findById(msg.conversationId);
+  const previousMentions = msg.mentions ? [...msg.mentions] : [];
+
   msg.content = parsed.content.trim();
   if (parsed.attachmentCaptions && msg.attachments.length > 0) {
     for (const item of parsed.attachmentCaptions) {
@@ -164,10 +171,25 @@ export async function editMessage(req: AuthenticatedRequest, res: Response) {
     }
   }
   msg.links = msg.content ? await extractAndFetchLinkPreviews(msg.content) : [];
+
+  let editDirectMentionIds = new Set<string>();
+  let editMentionsEveryone = false;
+  if (conv) {
+    const resolved = await resolveConversationMentions({
+      conversation: conv,
+      content: msg.content,
+      attachments: msg.attachments,
+      senderId: userId,
+      senderType: 'user',
+    });
+    msg.mentions = resolved.mentions;
+    editDirectMentionIds = resolved.directlyMentionedIds;
+    editMentionsEveryone = resolved.mentionsEveryone;
+  }
+
   msg.editedAt = new Date();
   await msg.save();
 
-  const conv = await Conversation.findById(msg.conversationId);
   if (conv?.lastMessage?.messageId?.toString() === msg._id.toString()) {
     const fallbackLabel =
       msg.messageType === 'image'
@@ -191,7 +213,7 @@ export async function editMessage(req: AuthenticatedRequest, res: Response) {
     .populate('senderId', 'fullName username avatar')
     .populate({
       path: 'replyTo',
-      select: 'content messageType senderType deletedAt senderId',
+      select: 'content messageType senderType deletedAt senderId mentions',
       populate: { path: 'senderId', select: 'fullName username' },
     });
 
@@ -199,6 +221,27 @@ export async function editMessage(req: AuthenticatedRequest, res: Response) {
 
   const io = getIO();
   io?.to(`conversation:${msg.conversationId.toString()}`).emit('message:edit', serialized);
+
+  if (conv) {
+    const previewForMention =
+      msg.content ||
+      msg.attachments.find((a) => a.caption?.trim())?.caption?.trim() ||
+      'Edited message';
+    void notifyNewlyMentionedOnEdit({
+      conversation: conv,
+      messageId: msg._id.toString(),
+      editorUserId: userId,
+      previewText: previewForMention,
+      previousMentions,
+      nextMentions: msg.mentions,
+      directlyMentionedIds: editDirectMentionIds,
+      mentionsEveryone: editMentionsEveryone,
+      createdAt: msg.createdAt,
+      io,
+    }).catch(() => {
+      // Best-effort edit mention notification
+    });
+  }
 
   res.json({ success: true, data: serialized });
 }
@@ -250,6 +293,7 @@ export async function deleteMessage(req: AuthenticatedRequest, res: Response) {
   msg.content = '';
   msg.attachments = [];
   msg.links = [];
+  msg.mentions = [];
   msg.reactions = [];
   await msg.save();
 
@@ -389,7 +433,7 @@ export async function getMessagesAround(req: AuthenticatedRequest, res: Response
       .populate('senderId', PUBLIC_USER_SELECT)
       .populate({
         path: 'replyTo',
-        select: 'content messageType senderType deletedAt senderId',
+        select: 'content messageType senderType deletedAt senderId mentions',
         populate: { path: 'senderId', select: 'fullName username' },
       }),
     Message.find({
@@ -404,7 +448,7 @@ export async function getMessagesAround(req: AuthenticatedRequest, res: Response
       .populate('senderId', PUBLIC_USER_SELECT)
       .populate({
         path: 'replyTo',
-        select: 'content messageType senderType deletedAt senderId',
+        select: 'content messageType senderType deletedAt senderId mentions',
         populate: { path: 'senderId', select: 'fullName username' },
       }),
   ]);

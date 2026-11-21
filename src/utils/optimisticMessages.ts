@@ -5,6 +5,7 @@ import type {
   Message,
   MessageAttachment,
   MessageDeliveryStatus,
+  MessageMention,
   User,
 } from '../types';
 
@@ -46,6 +47,7 @@ export function createOptimisticMessage(params: {
   mediaProgress?: MediaUploadProgressItem[];
   replyTo?: Message | null;
   duration?: number;
+  mentions?: MessageMention[];
 }): Message {
   const {
     clientMessageId,
@@ -57,6 +59,7 @@ export function createOptimisticMessage(params: {
     mediaProgress,
     replyTo,
     duration,
+    mentions = [],
   } = params;
 
   return {
@@ -75,12 +78,14 @@ export function createOptimisticMessage(params: {
     attachments,
     mediaProgress,
     links: [],
+    mentions,
     replyTo: replyTo
       ? {
           id: replyTo.id,
           content: replyTo.content,
           messageType: replyTo.messageType,
           senderName: replyTo.sender?.fullName || 'User',
+          mentions: replyTo.mentions,
         }
       : null,
     forwardedFrom: null,
